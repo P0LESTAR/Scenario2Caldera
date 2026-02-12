@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# Configuration
+config.py
+.env
+
+# Results 
+results/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+# Scenario2Caldera Requirements
+
+# LLM Client
+ollama>=0.1.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# JSON Processing (built-in, but listed for clarity)
+# json (built-in)
+
+# Path handling (built-in)
+# pathlib (built-in)
+
+# Type hints (built-in)
+# typing (built-in)
