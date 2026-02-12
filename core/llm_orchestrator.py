@@ -1,90 +1,59 @@
 #!/usr/bin/env python3
 """
 LLM Orchestrator
-실행 가능한 techniques만 사용하여 최적화된 공격 체인 생성
+검증 완료된 기법들을 LLM을 통해 논리적인 공격 순서로 정렬
 """
 
 import sys
 import json
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 from ollama import Client as OllamaClient
 
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import LLM_CONFIG
-from core.caldera_client import CalderaClient
 
 
 class LLMOrchestrator:
     """
-    LLM을 활용한 공격 체인 오케스트레이션
-    Caldera에서 검증된 기법들을 논리적인 순서로 정렬
+    LLM을 활용한 공격 체인 순서 결정
+    (Caldera ability 조회는 ScenarioValidator에서 이미 완료됨)
     """
 
     def __init__(self):
         self.client = OllamaClient(host=LLM_CONFIG["host"])
         self.model = LLM_CONFIG["model"]
-        self.caldera_client = CalderaClient()
 
     def plan_executable_attack_chain(self, validated_techniques: List[Dict],
                                      scenario_context: Dict = None) -> List[Dict]:
         """
-        실행 가능한 techniques만 사용하여 최적화된 공격 체인 생성
+        검증 완료된 techniques를 논리적인 공격 순서로 정렬
         
         Args:
-            validated_techniques: Caldera 검증이 완료된 technique 목록
-            scenario_context: 시나리오 컨텍스트 (이름, 타겟, 위협 행위자 등)
+            validated_techniques: ScenarioValidator에서 검증 완료된 technique 목록
+                (각 technique에 caldera_validation.selected_ability가 포함됨)
+            scenario_context: 시나리오 컨텍스트
         
         Returns:
-            List of attack steps
+            공격 순서가 정해진 step 목록
         """
         print("\n[*] Planning executable attack chain with LLM...")
         
-        # 실행 가능한 techniques만 필터링
-        executable_techs = [
-            t for t in validated_techniques
-            if t.get("caldera_validation", {}).get("executable", False)
-        ]
+        # 실행 가능 + ability가 선택된 techniques만 필터링
+        executable_techs = []
+        for t in validated_techniques:
+            validation = t.get("caldera_validation", {})
+            if validation.get("executable") and validation.get("selected_ability"):
+                executable_techs.append(t)
         
         if not executable_techs:
-            print("  [!] No executable techniques found!")
+            print("  [!] No executable techniques with selected abilities found!")
             return []
         
         print(f"  OK Using {len(executable_techs)} executable techniques")
-        
-        # 각 technique의 best ability 선택
-        techniques_with_abilities = []
-        
-        for tech in executable_techs:
-            tech_id = tech["technique_id"]
-            
-            # Caldera에서 abilities 조회
-            result = self.caldera_client.get_abilities_with_fallback(tech_id)
-            
-            if result['abilities']:
-                # Best ability 선택
-                best_ability = self.caldera_client.select_best_ability(
-                    result['abilities'],
-                    prefer_low_privilege=True,  # 낮은 권한 선호
-                    platform="windows"          # 윈도우 타겟 가정 (추후 동적 처리 가능)
-                )
-                
-                if best_ability:
-                    techniques_with_abilities.append({
-                        "technique_id": tech_id,
-                        "technique_name": tech.get("technique_name"),
-                        "tactic": tech.get("tactic"),
-                        "description": tech.get("description"),
-                        "expected_action": tech.get("expected_action"),
-                        "ability_id": best_ability.get("ability_id"),
-                        "ability_name": best_ability.get("name"),
-                        "ability_privilege": best_ability.get("privilege", "User"),
-                        "ability_count": len(result['abilities'])
-                    })
-        
-        print(f"  OK Matched {len(techniques_with_abilities)} techniques with abilities")
         
         # LLM 프롬프트
         system_prompt = """You are a red team operations planner expert in MITRE ATT&CK.
@@ -106,13 +75,13 @@ Output ONLY valid JSON array:
   }
 ]"""
         
-        # Techniques 요약 (ability 정보 포함)
+        # Techniques 요약
         techniques_summary = "\n".join([
             f"""  {i+1}. {t['technique_id']}: {t['technique_name']}
      Tactic: {t['tactic']}
-     Ability: {t['ability_name']} (Privilege: {t['ability_privilege']})
-     Expected: {t['expected_action'][:100]}..."""
-            for i, t in enumerate(techniques_with_abilities)
+     Ability: {t['caldera_validation']['selected_ability']['name']} (Privilege: {t['caldera_validation']['selected_ability']['privilege']})
+     Expected: {t.get('expected_action', 'N/A')[:100]}..."""
+            for i, t in enumerate(executable_techs)
         ])
         
         # 시나리오 컨텍스트
@@ -152,44 +121,36 @@ Generate the execution plan as JSON array with step numbers and reasons."""
             result_text = response["message"]["content"].strip()
             
             # JSON 추출
-            import re
             result_text = re.sub(r"```json\s*", "", result_text)
             result_text = re.sub(r"```\s*", "", result_text)
             
-            # JSON 파싱
             plan = json.loads(result_text)
             
-            # Technique 정보와 ability 정보 병합
+            # LLM 결과에 ability 정보 병합
             enriched_plan = []
             for step in plan:
                 tech_id = step.get("technique_id")
                 
-                # 해당 technique 찾기
                 tech_info = next(
-                    (t for t in techniques_with_abilities if t["technique_id"] == tech_id),
+                    (t for t in executable_techs if t["technique_id"] == tech_id),
                     None
                 )
                 
                 if tech_info:
-                    enriched_step = {
-                        # 기존 step 정보 (reason, dependencies 등)
-                        **step,
-                        # 추가 정보 (이름, ability 등)
+                    selected = tech_info["caldera_validation"]["selected_ability"]
+                    enriched_plan.append({
+                        "step": int(step.get("step", 0)),
+                        "technique_id": tech_id,
                         "technique_name": tech_info["technique_name"],
                         "tactic": tech_info["tactic"],
-                        "ability_id": tech_info["ability_id"],
-                        "ability_name": tech_info["ability_name"]
-                    }
-                    
-                    # Ensure step is int
-                    if "step" in enriched_step:
-                         enriched_step["step"] = int(enriched_step["step"])
-
-                    enriched_plan.append(enriched_step)
+                        "ability_id": selected["ability_id"],
+                        "ability_name": selected["name"],
+                        "reason": step.get("reason", ""),
+                        "dependencies": step.get("dependencies", [])
+                    })
             
             print(f"  OK Generated attack chain with {len(enriched_plan)} steps")
             
-            # 요약 출력
             print(f"\n[*] Attack Chain Summary:")
             for step in enriched_plan:
                 print(f"    {step['step']}. {step['technique_id']} ({step['tactic']})")
@@ -205,13 +166,3 @@ Generate the execution plan as JSON array with step numbers and reasons."""
         except Exception as e:
             print(f"  [!] Error: {e}")
             return []
-
-
-# Alias for backward compatibility
-EnhancedLLMOrchestrator = LLMOrchestrator
-
-if __name__ == "__main__":
-    print("="*80)
-    print("LLM Orchestrator Test")
-    print("="*80)
-    # 테스트 코드 생략

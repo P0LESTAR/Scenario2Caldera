@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""
+Pipeline
+시나리오 파싱 → Caldera 검증 → 공격 체인 계획 → Operation 생성
+"""
+
+import sys
+import json
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Optional, Tuple
+
+# 상위 디렉토리를 path에 추가
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.scenario import ScenarioProcessor
+from core.llm_orchestrator import LLMOrchestrator
+from core.caldera_client import CalderaClient
+
+
+class Pipeline:
+    """Scenario2Caldera 전체 파이프라인"""
+
+    def __init__(self):
+        self.scenario = ScenarioProcessor()
+        self.orchestrator = LLMOrchestrator()
+        self.caldera = CalderaClient()
+
+    def run(self, scenario_file: str, output_dir: str = None) -> Optional[Tuple[Path, str]]:
+        """
+        전체 파이프라인 실행
+
+        Args:
+            scenario_file: 시나리오 파일 경로
+            output_dir: 결과 저장 디렉토리 (기본: results/)
+
+        Returns:
+            (session_dir, operation_id) 또는 None
+        """
+        self._print_header("SCENARIO2CALDERA FULL PIPELINE EXECUTION")
+
+        # 파일 경로 처리
+        scenario_path = Path(scenario_file)
+        if not scenario_path.is_absolute():
+            scenario_path = Path(__file__).parent.parent / scenario_file
+
+        if not scenario_path.exists():
+            print(f"[!] Scenario file not found: {scenario_path}")
+            return None
+
+        print(f"\n[*] Scenario: {scenario_path}")
+
+        # 출력 디렉토리 생성
+        if output_dir:
+            base_dir = Path(output_dir)
+        else:
+            base_dir = Path(__file__).parent.parent / "results"
+        base_dir.mkdir(exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = base_dir / f"session_{timestamp}"
+        session_dir.mkdir(exist_ok=True)
+
+        print(f"[*] Output directory: {session_dir}")
+
+        # ==================================================================
+        # PHASE 1: 시나리오 파싱
+        # ==================================================================
+        self._print_header("PHASE 1: Scenario Parsing")
+
+        parsed_data = self.scenario.parse(scenario_path)
+
+        if not parsed_data:
+            print("[!] Failed to parse scenario")
+            return None
+
+        print(f"  ✓ Scenario: {parsed_data.get('scenario_name')}")
+        print(f"  ✓ Target: {parsed_data.get('target_org')}")
+        print(f"  ✓ Threat Actor: {parsed_data.get('threat_actor')}")
+        print(f"  ✓ Techniques: {len(parsed_data.get('techniques', []))}")
+
+        self._save_json(session_dir / "01_parsed_scenario.json", parsed_data)
+
+        # ==================================================================
+        # PHASE 2: Caldera 검증
+        # ==================================================================
+        self._print_header("PHASE 2: Caldera Validation")
+
+        validated_data = self.scenario.validate(parsed_data)
+
+        validation = validated_data.get('validation', {})
+        print(f"\n  ✓ Total Techniques:     {validation.get('total')}")
+        print(f"  ✓ Executable:           {validation.get('executable')} ({validation.get('coverage_rate', 0):.1f}%)")
+        print(f"  ✗ Non-Executable:       {validation.get('non_executable')}")
+
+        self._save_json(session_dir / "02_validated_scenario.json", validated_data)
+
+        executable_techs = self.scenario.get_executable_techniques(validated_data)
+
+        if not executable_techs:
+            print("\n[!] No executable techniques found!")
+            return None
+
+        print(f"\n[*] Executable techniques:")
+        for tech in executable_techs:
+            print(f"  ✓ {tech['technique_id']}: {tech['technique_name']}")
+
+        # ==================================================================
+        # PHASE 3: 공격 체인 계획
+        # ==================================================================
+        self._print_header("PHASE 3: Attack Chain Planning")
+
+        scenario_context = {
+            "scenario_name": validated_data.get("scenario_name"),
+            "target_org": validated_data.get("target_org"),
+            "threat_actor": validated_data.get("threat_actor")
+        }
+
+        attack_chain = self.orchestrator.plan_executable_attack_chain(
+            validated_data.get("techniques", []),
+            scenario_context
+        )
+
+        if not attack_chain:
+            print("\n[!] Failed to generate attack chain")
+            return None
+
+        print(f"\n  ✓ Attack chain generated: {len(attack_chain)} steps")
+
+        self._save_json(session_dir / "03_attack_chain.json", {
+            "scenario": scenario_context,
+            "validation": validation,
+            "attack_chain": attack_chain
+        })
+
+        # ==================================================================
+        # PHASE 4: Caldera Operation 생성
+        # ==================================================================
+        self._print_header("PHASE 4: Caldera Operation Creation")
+
+        operation_plan = {
+            "name": f"S2C_{validated_data.get('threat_actor', 'Unknown').replace(' ', '_')}",
+            "description": f"Automated attack chain for {validated_data.get('scenario_name')}",
+            "steps": attack_chain
+        }
+
+        # Agent 확인
+        agents = self.caldera.list_agents()
+
+        if not agents:
+            print("\n" + "="*80)
+            print("⚠️  NO AGENTS AVAILABLE")
+            print("="*80)
+            print("\n📋 Deploy Caldera agent on target VM, then run again.")
+            return None
+
+        selected_agent = agents[0].get('paw')
+        print(f"\n[*] Auto-selecting first agent: {selected_agent}")
+
+        # Operation 생성 (Paused)
+        operation = self.caldera.create_operation_from_plan(
+            operation_plan,
+            agent_paw=selected_agent,
+            auto_start=False
+        )
+
+        if not operation:
+            print("\n[!] Failed to create operation")
+            return None
+
+        self._save_json(session_dir / "04_created_operation.json", {
+            "operation": operation,
+            "adversary_name": operation_plan.get('name'),
+            "attack_chain": attack_chain,
+            "selected_agent": selected_agent,
+        })
+
+        # ==================================================================
+        # 최종 요약
+        # ==================================================================
+        self._print_header("PIPELINE EXECUTION COMPLETE")
+
+        print(f"\n📊 Summary:")
+        print(f"    Scenario:             {validated_data.get('scenario_name')}")
+        print(f"    Threat Actor:         {validated_data.get('threat_actor')}")
+        print(f"    Total Techniques:     {validation.get('total')}")
+        print(f"    Executable:           {validation.get('executable')} ({validation.get('coverage_rate', 0):.1f}%)")
+        print(f"    Attack Chain Steps:   {len(attack_chain)}")
+        print(f"    Operation ID:         {operation.get('id')}")
+        print(f"    Target Agent:         {selected_agent}")
+
+        print(f"\n📁 Generated Files:")
+        print(f"    {session_dir}/")
+        print(f"    ├── 01_parsed_scenario.json")
+        print(f"    ├── 02_validated_scenario.json")
+        print(f"    ├── 03_attack_chain.json")
+        print(f"    └── 04_created_operation.json")
+
+        print(f"\n💡 Next Steps:")
+        print(f"    1. Open Caldera UI:")
+        print(f"       {self.caldera.base_url}/#/operations/{operation.get('id')}")
+        print(f"    2. Click 'Start' to begin execution")
+
+        print("\n" + "="*80)
+        print("✅ READY FOR EXECUTION!")
+        print("="*80)
+
+        # 세션 정보 저장
+        self._save_json(session_dir / "session_info.json", {
+            "session_dir": str(session_dir),
+            "operation_id": operation.get('id'),
+            "timestamp": datetime.now().isoformat()
+        })
+
+        return session_dir, operation.get('id')
+
+    # ==================== Helpers ====================
+
+    @staticmethod
+    def _print_header(title: str):
+        print("\n" + "="*80)
+        print(title)
+        print("="*80)
+
+    @staticmethod
+    def _save_json(path: Path, data: Dict):
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"\n[*] Saved: {path.name}")

@@ -10,6 +10,5 @@ config.py
 results/
 logs/
 
-# OS
-.DS_Store
-Thumbs.db
+# Scenarios
+scenarios/
