@@ -6,6 +6,7 @@ Pipeline
 
 import sys
 import json
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Tuple
@@ -157,11 +158,11 @@ class Pipeline:
         selected_agent = agents[0].get('paw')
         print(f"\n[*] Auto-selecting first agent: {selected_agent}")
 
-        # Operation 생성 (Paused)
+        # Operation 생성 및 실행
         operation = self.caldera.create_operation_from_plan(
             operation_plan,
             agent_paw=selected_agent,
-            auto_start=False
+            auto_start=True
         )
 
         if not operation:
@@ -175,10 +176,19 @@ class Pipeline:
             "selected_agent": selected_agent,
         })
 
+        operation_id = operation.get('id')
+
+        # ==================================================================
+        # PHASE 5: Operation 완료 대기 + 결과 수집
+        # ==================================================================
+        self._print_header("PHASE 5: Waiting for Operation to Complete")
+
+        results = self._wait_and_collect(operation_id, session_dir)
+
         # ==================================================================
         # 최종 요약
         # ==================================================================
-        self._print_header("PIPELINE EXECUTION COMPLETE")
+        self._print_header("PIPELINE COMPLETE")
 
         print(f"\n📊 Summary:")
         print(f"    Scenario:             {validated_data.get('scenario_name')}")
@@ -186,33 +196,117 @@ class Pipeline:
         print(f"    Total Techniques:     {validation.get('total')}")
         print(f"    Executable:           {validation.get('executable')} ({validation.get('coverage_rate', 0):.1f}%)")
         print(f"    Attack Chain Steps:   {len(attack_chain)}")
-        print(f"    Operation ID:         {operation.get('id')}")
+        print(f"    Operation ID:         {operation_id}")
         print(f"    Target Agent:         {selected_agent}")
+
+        if results:
+            stats = results.get('stats', {})
+            total = stats.get('total', 0)
+            success = stats.get('success', 0)
+            failed = stats.get('failed', 0)
+            rate = (success / total * 100) if total > 0 else 0
+            print(f"    Commands Executed:     {total}")
+            print(f"    ✓ Success:            {success} ({rate:.1f}%)")
+            print(f"    ✗ Failed:             {failed}")
 
         print(f"\n📁 Generated Files:")
         print(f"    {session_dir}/")
         print(f"    ├── 01_parsed_scenario.json")
         print(f"    ├── 02_validated_scenario.json")
         print(f"    ├── 03_attack_chain.json")
-        print(f"    └── 04_created_operation.json")
+        print(f"    ├── 04_created_operation.json")
+        print(f"    └── 05_operation_results.json")
 
-        print(f"\n💡 Next Steps:")
-        print(f"    1. Open Caldera UI:")
-        print(f"       {self.caldera.base_url}/#/operations/{operation.get('id')}")
-        print(f"    2. Click 'Start' to begin execution")
+        print(f"\n🔗 Caldera UI:")
+        print(f"    {self.caldera.base_url}/#/operations/{operation_id}")
 
         print("\n" + "="*80)
-        print("✅ READY FOR EXECUTION!")
+        print("✅ DONE")
         print("="*80)
 
-        # 세션 정보 저장
         self._save_json(session_dir / "session_info.json", {
             "session_dir": str(session_dir),
-            "operation_id": operation.get('id'),
+            "operation_id": operation_id,
             "timestamp": datetime.now().isoformat()
         })
 
-        return session_dir, operation.get('id')
+        return session_dir, operation_id
+
+    def _wait_and_collect(self, operation_id: str, session_dir: Path,
+                          poll_interval: int = 10, timeout: int = 1800) -> Optional[Dict]:
+        """
+        Operation 완료까지 폴링 후 결과 수집
+
+        Args:
+            operation_id: Operation ID
+            session_dir: 결과 저장 디렉토리
+            poll_interval: 폴링 간격 (초, 기본 10)
+            timeout: 최대 대기 시간 (초, 기본 1800 = 30분)
+
+        Returns:
+            분석 결과 dict
+        """
+        start_time = time.time()
+        last_link_count = 0
+
+        print(f"[*] Polling every {poll_interval}s (timeout: {timeout//60}min)")
+
+        while True:
+            elapsed = time.time() - start_time
+
+            if elapsed > timeout:
+                print(f"\n[!] Timeout after {timeout//60} minutes")
+                break
+
+            op = self.caldera.get_operation(operation_id)
+            if not op:
+                print(f"  [!] Failed to fetch operation")
+                time.sleep(poll_interval)
+                continue
+
+            state = op.get('state', 'unknown')
+            links = op.get('chain', [])
+            link_count = len(links)
+
+            # 진행 상황 표시 (새 link가 추가될 때만)
+            if link_count != last_link_count:
+                mins = int(elapsed // 60)
+                secs = int(elapsed % 60)
+                print(f"  [{mins:02d}:{secs:02d}] state={state}, links={link_count}")
+                last_link_count = link_count
+
+            if state == 'finished':
+                mins = int(elapsed // 60)
+                secs = int(elapsed % 60)
+                print(f"\n  ✓ Operation finished in {mins}m {secs}s")
+                break
+
+            time.sleep(poll_interval)
+
+        # 결과 수집 및 분석
+        result = self.caldera.get_operation_results(operation_id)
+        if not result:
+            print("[!] Failed to collect results")
+            return None
+
+        op = result['operation']
+        links = result['links']
+        stats = self.caldera.analyze_links(links)
+
+        # 분석 출력
+        self.caldera.print_analysis(op, links, stats)
+
+        # 결과 저장
+        self._save_json(session_dir / "05_operation_results.json", {
+            "operation_id": operation_id,
+            "operation_name": op.get('name'),
+            "state": op.get('state'),
+            "summary": stats,
+            "links": links,
+            "analyzed_at": datetime.now().isoformat()
+        })
+
+        return {"stats": stats, "links": links}
 
     # ==================== Helpers ====================
 
