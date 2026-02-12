@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.caldera_client_base import CalderaClient
+from core.caldera_client import CalderaClient
 
 
 class OperationAnalyzer:

@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.caldera_client_base import CalderaClient
+from core.caldera_client import CalderaClient
 
 
 class OperationCreator:
@@ -116,7 +116,7 @@ class OperationCreator:
         print("="*80)
         
         # 1. Adversary 생성
-        adversary_name = operation_plan.get('name', 'CARMA_Operation')
+        adversary_name = operation_plan.get('name', 'S2C_Operation')
         description = operation_plan.get('description', '')
         attack_chain = operation_plan.get('steps', [])
         

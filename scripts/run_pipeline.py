@@ -13,8 +13,8 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.scenario_parser import ScenarioParser
-from core.scenario_validator import EnhancedScenarioParser
-from core.llm_orchestrator import EnhancedLLMOrchestrator
+from core.scenario_validator import ScenarioValidator
+from core.llm_orchestrator import LLMOrchestrator
 from core.operation_creator import OperationCreator
 
 
@@ -86,10 +86,10 @@ def main(scenario_file: str):
     # ========================================================================
     print_header("PHASE 2: Caldera Validation")
     
-    enhanced_parser = EnhancedScenarioParser()
+    validator = ScenarioValidator()
     
     print(f"\n[*] Validating techniques with Caldera...")
-    validated_data = enhanced_parser.validate_techniques_with_caldera(parsed_data)
+    validated_data = validator.validate_techniques_with_caldera(parsed_data)
     
     validation = validated_data.get('validation', {})
     print(f"\n  ✓ Total Techniques:     {validation.get('total')}")
@@ -103,7 +103,7 @@ def main(scenario_file: str):
     print(f"\n[*] Saved: {validated_path.name}")
     
     # 실행 가능한 techniques 확인
-    executable_techs = enhanced_parser.get_executable_techniques(validated_data)
+    executable_techs = validator.get_executable_techniques(validated_data)
     
     if not executable_techs:
         print("\n[!] No executable techniques found!")
@@ -125,7 +125,7 @@ def main(scenario_file: str):
         "threat_actor": validated_data.get("threat_actor")
     }
     
-    orchestrator = EnhancedLLMOrchestrator()
+    orchestrator = LLMOrchestrator()
     
     print(f"\n[*] Planning attack chain with LLM...")
     attack_chain = orchestrator.plan_executable_attack_chain(

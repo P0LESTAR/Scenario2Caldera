@@ -1,41 +1,170 @@
 #!/usr/bin/env python3
 """
-Enhanced Caldera Client
-Parent Technique Fallback 및 Best Ability Selection 기능 추가
+Caldera C2 API Client
+Agent 관리, Ability 실행 및 Fallback Logic 제공
 """
 
-import sys
-from pathlib import Path
+import requests
+import time
+import json
 from typing import Dict, List, Optional
+from pathlib import Path
+import sys
 
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.caldera_client_base import CalderaClient
+from config import CALDERA_CONFIG
 
 
-class EnhancedCalderaClient(CalderaClient):
-    """
-    CalderaClient를 상속받아 추가 기능 제공
-    - Parent Technique Fallback
-    - Best Ability Selection
-    """
-    
+class CalderaClient:
+    """Caldera REST API 클라이언트 with Enhanced Features"""
+
+    def __init__(self):
+        self.base_url = CALDERA_CONFIG["url"]
+        self.api_key = CALDERA_CONFIG["api_key"]
+        self.timeout = CALDERA_CONFIG.get("timeout", 30)
+
+        self.headers = {
+            "KEY": self.api_key,
+            "Content-Type": "application/json"
+        }
+
+        print(f"[*] Caldera client initialized: {self.base_url}")
+
+    def _request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict]:
+        """API 요청 헬퍼"""
+        url = f"{self.base_url}/api/v2/{endpoint}"
+
+        try:
+            resp = requests.request(
+                method,
+                url,
+                headers=self.headers,
+                timeout=self.timeout,
+                **kwargs
+            )
+            resp.raise_for_status()
+
+            try:
+                return resp.json()
+            except:
+                return {"raw": resp.text}
+
+        except requests.exceptions.RequestException as e:
+            print(f"  [!] API request failed: {url} - {e}")
+            return None
+
+    # ==================== Agents ====================
+
+    def get_agents(self) -> List[Dict]:
+        """모든 에이전트 목록"""
+        result = self._request("GET", "agents")
+        return result if isinstance(result, list) else []
+
+    def get_agent(self, paw: str) -> Optional[Dict]:
+        """특정 에이전트 조회"""
+        agents = self.get_agents()
+        for agent in agents:
+            if agent.get("paw") == paw:
+                return agent
+        return None
+
+    # ==================== Abilities ====================
+
+    def get_abilities(self, technique_id: Optional[str] = None) -> List[Dict]:
+        """Ability 목록 조회"""
+        abilities = self._request("GET", "abilities")
+        if not isinstance(abilities, list):
+            return []
+
+        if technique_id:
+            abilities = [
+                a for a in abilities
+                if a.get("technique_id") == technique_id
+            ]
+
+        return abilities
+
+    def get_ability(self, ability_id: str) -> Optional[Dict]:
+        """특정 Ability 조회"""
+        abilities = self.get_abilities()
+        for ability in abilities:
+            if ability.get("ability_id") == ability_id:
+                return ability
+        return None
+
+    # ==================== Operations ====================
+
+    def create_operation(self, name: str, adversary_id: str,
+                        group: str = "", state: str = "running") -> Optional[Dict]:
+        """새 오퍼레이션 생성"""
+        print(f"[*] Creating operation: {name}")
+
+        payload = {
+            "name": name,
+            "adversary": {"adversary_id": adversary_id},
+            "group": group,
+            "state": state,
+            "autonomous": 1,
+            "planner": {"id": "atomic"}
+        }
+
+        result = self._request("POST", "operations", json=payload)
+
+        if result:
+            print(f"  OK Operation created: {result.get('id')}")
+
+        return result
+
+    def get_operations(self) -> List[Dict]:
+        """모든 오퍼레이션 목록"""
+        result = self._request("GET", "operations")
+        return result if isinstance(result, list) else []
+
+    def get_operation(self, operation_id: str) -> Optional[Dict]:
+        """특정 오퍼레이션 조회"""
+        result = self._request("GET", f"operations/{operation_id}")
+        return result
+        
+    def get_operation_links(self, operation_id: str) -> List[Dict]:
+        """오퍼레이션의 실행된 링크(명령) 목록"""
+        op = self.get_operation(operation_id)
+        if op:
+            return op.get("chain", [])
+        return []
+
+    # ==================== Adversaries ====================
+
+    def get_adversaries(self) -> List[Dict]:
+        """모든 Adversary 목록"""
+        result = self._request("GET", "adversaries")
+        return result if isinstance(result, list) else []
+
+    def create_adversary(self, name: str, description: str,
+                        atomic_ordering: List[str]) -> Optional[Dict]:
+        """새 Adversary 생성"""
+        print(f"[*] Creating adversary: {name}")
+
+        payload = {
+            "name": name,
+            "description": description,
+            "atomic_ordering": atomic_ordering,
+            "tags": ["S2C-generated"]
+        }
+
+        result = self._request("POST", "adversaries", json=payload)
+
+        if result:
+            print(f"  OK Adversary created: {result.get('adversary_id')}")
+
+        return result
+
+    # ==================== Enhanced Features ====================
+
     def get_abilities_with_fallback(self, technique_id: str, enable_fallback: bool = True) -> Dict:
         """
         Technique ID로 Ability 조회 (Parent Technique Fallback 지원)
-        
-        Args:
-            technique_id: MITRE ATT&CK 기법 ID (예: T1547.001)
-            enable_fallback: Parent technique fallback 활성화 여부
-        
-        Returns:
-            {
-                "technique_id": str,  # 실제 매칭된 technique ID
-                "match_type": str,    # "exact", "parent", "none"
-                "abilities": List[Dict],
-                "fallback_applied": bool
-            }
         """
         result = {
             "technique_id": technique_id,
@@ -70,17 +199,7 @@ class EnhancedCalderaClient(CalderaClient):
     def select_best_ability(self, abilities: List[Dict], 
                            prefer_low_privilege: bool = True,
                            platform: Optional[str] = None) -> Optional[Dict]:
-        """
-        여러 Ability 중 최적의 것을 선택
-        
-        Args:
-            abilities: Ability 목록
-            prefer_low_privilege: 낮은 권한 우선 선택 여부
-            platform: 플랫폼 필터 (windows, linux, darwin)
-        
-        Returns:
-            선택된 Ability (없으면 None)
-        """
+        """여러 Ability 중 최적의 것을 선택"""
         if not abilities:
             return None
         
@@ -99,7 +218,6 @@ class EnhancedCalderaClient(CalderaClient):
         
         # 권한 기반 정렬
         if prefer_low_privilege:
-            # 권한이 없거나 낮은 것 우선
             def privilege_score(ability):
                 priv = ability.get("privilege", "")
                 if not priv or priv == "":
@@ -110,7 +228,6 @@ class EnhancedCalderaClient(CalderaClient):
                     return 2
                 else:
                     return 3
-            
             abilities = sorted(abilities, key=privilege_score)
         
         # 요구사항이 적은 것 우선
@@ -119,36 +236,12 @@ class EnhancedCalderaClient(CalderaClient):
         return abilities[0] if abilities else None
 
 
+# Alias for backward compatibility (if needed)
+EnhancedCalderaClient = CalderaClient
+
 if __name__ == "__main__":
-    # 테스트
-    print("="*80)
-    print("Enhanced Caldera Client Test")
-    print("="*80)
-    
-    client = EnhancedCalderaClient()
-    
-    # 테스트 케이스
-    test_cases = [
-        "T1547.001",  # Sub-technique with abilities
-        "T1589.001",  # Sub-technique without abilities
-        "T1047",      # Parent technique with abilities
-    ]
-    
-    for tech_id in test_cases:
-        print(f"\n[Test] {tech_id}")
-        print("-"*80)
-        
-        result = client.get_abilities_with_fallback(tech_id)
-        
-        print(f"  Match Type: {result['match_type']}")
-        print(f"  Matched ID: {result['technique_id']}")
-        print(f"  Abilities: {len(result['abilities'])}")
-        print(f"  Fallback: {result['fallback_applied']}")
-        
-        if result['abilities']:
-            best = client.select_best_ability(
-                result['abilities'],
-                platform="windows"
-            )
-            if best:
-                print(f"  Best: {best.get('name')}")
+    client = CalderaClient()
+    print("\n[*] Connected agents:")
+    agents = client.get_agents()
+    for agent in agents:
+        print(f"  - {agent['paw']}: {agent.get('platform')} @ {agent.get('host')}")

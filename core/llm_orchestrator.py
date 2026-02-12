@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 """
-Enhanced LLM Orchestrator (테스트 버전)
+LLM Orchestrator
 실행 가능한 techniques만 사용하여 최적화된 공격 체인 생성
 """
 
 import sys
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+from ollama import Client as OllamaClient
 
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.llm_orchestrator_base import LLMOrchestrator
-from core.caldera_client import EnhancedCalderaClient
+from config import LLM_CONFIG
+from core.caldera_client import CalderaClient
 
 
-class EnhancedLLMOrchestrator(LLMOrchestrator):
+class LLMOrchestrator:
     """
-    LLMOrchestrator를 상속받아 개선된 공격 체인 계획 기능 제공
+    LLM을 활용한 공격 체인 오케스트레이션
+    Caldera에서 검증된 기법들을 논리적인 순서로 정렬
     """
-    
+
     def __init__(self):
-        super().__init__()
-        self.caldera_client = EnhancedCalderaClient()
-    
+        self.client = OllamaClient(host=LLM_CONFIG["host"])
+        self.model = LLM_CONFIG["model"]
+        self.caldera_client = CalderaClient()
+
     def plan_executable_attack_chain(self, validated_techniques: List[Dict],
                                      scenario_context: Dict = None) -> List[Dict]:
         """
@@ -35,18 +38,7 @@ class EnhancedLLMOrchestrator(LLMOrchestrator):
             scenario_context: 시나리오 컨텍스트 (이름, 타겟, 위협 행위자 등)
         
         Returns:
-            [
-                {
-                    "step": 1,
-                    "technique_id": "T1047",
-                    "technique_name": "WMI",
-                    "tactic": "execution",
-                    "ability_id": "abc-123",
-                    "ability_name": "WMI Execute Local Process",
-                    "reason": "Execute initial payload",
-                    "dependencies": []
-                }
-            ]
+            List of attack steps
         """
         print("\n[*] Planning executable attack chain with LLM...")
         
@@ -75,8 +67,8 @@ class EnhancedLLMOrchestrator(LLMOrchestrator):
                 # Best ability 선택
                 best_ability = self.caldera_client.select_best_ability(
                     result['abilities'],
-                    prefer_low_privilege=True,
-                    platform="windows"
+                    prefer_low_privilege=True,  # 낮은 권한 선호
+                    platform="windows"          # 윈도우 타겟 가정 (추후 동적 처리 가능)
                 )
                 
                 if best_ability:
@@ -94,7 +86,7 @@ class EnhancedLLMOrchestrator(LLMOrchestrator):
         
         print(f"  OK Matched {len(techniques_with_abilities)} techniques with abilities")
         
-        # LLM 프롬프트 (개선된 버전)
+        # LLM 프롬프트
         system_prompt = """You are a red team operations planner expert in MITRE ATT&CK.
 Your task is to create a logical, executable attack chain.
 
@@ -180,12 +172,19 @@ Generate the execution plan as JSON array with step numbers and reasons."""
                 
                 if tech_info:
                     enriched_step = {
+                        # 기존 step 정보 (reason, dependencies 등)
                         **step,
+                        # 추가 정보 (이름, ability 등)
                         "technique_name": tech_info["technique_name"],
                         "tactic": tech_info["tactic"],
                         "ability_id": tech_info["ability_id"],
                         "ability_name": tech_info["ability_name"]
                     }
+                    
+                    # Ensure step is int
+                    if "step" in enriched_step:
+                         enriched_step["step"] = int(enriched_step["step"])
+
                     enriched_plan.append(enriched_step)
             
             print(f"  OK Generated attack chain with {len(enriched_plan)} steps")
@@ -208,53 +207,11 @@ Generate the execution plan as JSON array with step numbers and reasons."""
             return []
 
 
+# Alias for backward compatibility
+EnhancedLLMOrchestrator = LLMOrchestrator
+
 if __name__ == "__main__":
     print("="*80)
-    print("Enhanced LLM Orchestrator Test")
+    print("LLM Orchestrator Test")
     print("="*80)
-    
-    # 검증된 시나리오 데이터 로드
-    validated_path = Path(__file__).parent / "validated_scenario.json"
-    
-    if not validated_path.exists():
-        print("[!] Please run scenario_parser_enhanced.py first to generate validated_scenario.json")
-        sys.exit(1)
-    
-    with open(validated_path, 'r', encoding='utf-8') as f:
-        validated_data = json.load(f)
-    
-    print(f"\n[*] Loaded validated scenario: {validated_data.get('scenario_name')}")
-    
-    # 시나리오 컨텍스트
-    scenario_context = {
-        "scenario_name": validated_data.get("scenario_name"),
-        "target_org": validated_data.get("target_org"),
-        "threat_actor": validated_data.get("threat_actor")
-    }
-    
-    # LLM Orchestrator로 공격 체인 계획
-    orchestrator = EnhancedLLMOrchestrator()
-    
-    attack_chain = orchestrator.plan_executable_attack_chain(
-        validated_data.get("techniques", []),
-        scenario_context
-    )
-    
-    if attack_chain:
-        # 결과 저장
-        output_path = Path(__file__).parent / "attack_chain_plan.json"
-        
-        output_data = {
-            "scenario": scenario_context,
-            "validation_summary": validated_data.get("validation"),
-            "attack_chain": attack_chain
-        }
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"\n[*] Attack chain plan saved to: {output_path}")
-        
-        print("\n" + "="*80)
-        print("Test Complete!")
-        print("="*80)
+    # 테스트 코드 생략
