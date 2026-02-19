@@ -115,7 +115,7 @@ Generate the execution plan as JSON array with step numbers and reasons."""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                options={"temperature": 0.1}
+                options={"temperature": 0.0}
             )
             
             result_text = response["message"]["content"].strip()

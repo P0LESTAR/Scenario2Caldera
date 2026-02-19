@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.scenario import ScenarioProcessor
 from core.llm_orchestrator import LLMOrchestrator
 from core.caldera_client import CalderaClient
+from core.retry_analyzer import RetryAnalyzer
 
 
 class Pipeline:
@@ -186,6 +187,52 @@ class Pipeline:
         results = self._wait_and_collect(operation_id, session_dir)
 
         # ==================================================================
+        # PHASE 6: 실패 분석 + 대체 기법 재실행
+        # ==================================================================
+        retry_result = None
+
+        if results and results.get('stats', {}).get('failed', 0) > 0:
+            self._print_header("PHASE 6: Failure Analysis & Auto Retry")
+
+            # Agent 정보 수집
+            agent = self.caldera.get_agent(selected_agent)
+            agent_info = {
+                "platform": agent.get('platform', 'windows') if agent else 'windows',
+                "privilege": agent.get('privilege', 'User') if agent else 'User'
+            }
+
+            retry_analyzer = RetryAnalyzer()
+            retry_name = f"{operation_plan.get('name', 'S2C')}_Retry"
+
+            retry_result = retry_analyzer.run(
+                operation_results=results,
+                agent_info=agent_info,
+                agent_paw=selected_agent,
+                retry_name=retry_name
+            )
+
+            if retry_result:
+                self._save_json(session_dir / "06_retry_analysis.json", {
+                    "recommendations": retry_result.get('recommendations', []),
+                    "alternatives": retry_result.get('alternatives', []),
+                })
+
+                # 보완 Operation 결과 대기
+                retry_op = retry_result.get('retry_operation')
+                if retry_op:
+                    retry_op_id = retry_op.get('id')
+                    self._print_header("PHASE 6b: Waiting for Retry Operation")
+                    retry_op_results = self._wait_and_collect(
+                        retry_op_id, session_dir,
+                        result_filename="07_retry_results.json"
+                    )
+                    if retry_op_results:
+                        retry_result['retry_stats'] = retry_op_results.get('stats', {})
+        else:
+            if results:
+                print("\n[*] All steps succeeded! No retry needed.")
+
+        # ==================================================================
         # 최종 요약
         # ==================================================================
         self._print_header("PIPELINE COMPLETE")
@@ -209,13 +256,29 @@ class Pipeline:
             print(f"    ✓ Success:            {success} ({rate:.1f}%)")
             print(f"    ✗ Failed:             {failed}")
 
+        if retry_result:
+            alts = retry_result.get('alternatives', [])
+            retry_stats = retry_result.get('retry_stats', {})
+            print(f"\n    🔄 Retry:")
+            print(f"    Alternative abilities: {len(alts)}")
+            if retry_stats:
+                r_total = retry_stats.get('total', 0)
+                r_success = retry_stats.get('success', 0)
+                r_rate = (r_success / r_total * 100) if r_total > 0 else 0
+                print(f"    Retry Success:        {r_success}/{r_total} ({r_rate:.1f}%)")
+
         print(f"\n📁 Generated Files:")
         print(f"    {session_dir}/")
         print(f"    ├── 01_parsed_scenario.json")
         print(f"    ├── 02_validated_scenario.json")
         print(f"    ├── 03_attack_chain.json")
         print(f"    ├── 04_created_operation.json")
-        print(f"    └── 05_operation_results.json")
+        print(f"    ├── 05_operation_results.json")
+        if retry_result and retry_result.get('retry_operation'):
+            print(f"    ├── 06_retry_analysis.json")
+            print(f"    └── 07_retry_results.json")
+        else:
+            print(f"    └── session_info.json")
 
         print(f"\n🔗 Caldera UI:")
         print(f"    {self.caldera.base_url}/#/operations/{operation_id}")
@@ -233,7 +296,8 @@ class Pipeline:
         return session_dir, operation_id
 
     def _wait_and_collect(self, operation_id: str, session_dir: Path,
-                          poll_interval: int = 10, timeout: int = 1800) -> Optional[Dict]:
+                          poll_interval: int = 10, timeout: int = 1800,
+                          result_filename: str = "05_operation_results.json") -> Optional[Dict]:
         """
         Operation 완료까지 폴링 후 결과 수집
 
@@ -242,6 +306,7 @@ class Pipeline:
             session_dir: 결과 저장 디렉토리
             poll_interval: 폴링 간격 (초, 기본 10)
             timeout: 최대 대기 시간 (초, 기본 1800 = 30분)
+            result_filename: 결과 파일명
 
         Returns:
             분석 결과 dict
@@ -297,7 +362,7 @@ class Pipeline:
         self.caldera.print_analysis(op, links, stats)
 
         # 결과 저장
-        self._save_json(session_dir / "05_operation_results.json", {
+        self._save_json(session_dir / result_filename, {
             "operation_id": operation_id,
             "operation_name": op.get('name'),
             "state": op.get('state'),

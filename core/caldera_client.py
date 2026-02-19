@@ -153,10 +153,18 @@ class CalderaClient:
 
     def select_best_ability(self, abilities: List[Dict],
                            prefer_low_privilege: bool = True,
-                           platform: Optional[str] = None) -> Optional[Dict]:
+                           platform: Optional[str] = None,
+                           exclude_ids: List[str] = None) -> Optional[Dict]:
         """여러 Ability 중 최적의 것을 선택"""
         if not abilities:
             return None
+
+        # 실패한 ability 제외
+        if exclude_ids:
+            abilities = [a for a in abilities
+                         if a.get('ability_id') not in exclude_ids]
+            if not abilities:
+                return None
 
         # 플랫폼 필터링
         if platform:
@@ -388,12 +396,9 @@ class CalderaClient:
             if status == 0:
                 stats['success'] += 1
                 status_str = "success"
-            elif status == 1:
-                stats['running'] += 1
-                status_str = "running"
             else:
                 stats['failed'] += 1
-                status_str = f"failed ({status})"
+                status_str = f"failed (exit={status})"
 
             stats['by_status'][status_str] = stats['by_status'].get(status_str, 0) + 1
 
@@ -446,8 +451,6 @@ class CalderaClient:
             print(f"    Total Commands: {total}")
             print(f"    ✓ Success:      {stats['success']} ({stats['success']/total*100:.1f}%)")
             print(f"    ✗ Failed:       {stats['failed']} ({stats['failed']/total*100:.1f}%)")
-            if stats['running'] > 0:
-                print(f"    ⏳ Running:      {stats['running']}")
 
         print(f"\n🎯 Results by Technique:")
         for tech_id, ts in sorted(stats['by_technique'].items()):
@@ -465,7 +468,7 @@ class CalderaClient:
         for i, link in enumerate(links, 1):
             ability = link.get('ability', {})
             status = link.get('status', -999)
-            icon = "✓" if status == 0 else ("⏳" if status == 1 else "✗")
+            icon = "✓" if status == 0 else "✗"
 
             print(f"\n    {i}. {icon} {ability.get('technique_id', 'N/A')}: {ability.get('name', 'Unknown')}")
             print(f"       Tactic: {ability.get('tactic', 'N/A')}")
