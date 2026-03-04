@@ -75,7 +75,6 @@ class ReactAgent:
         ]
     }
 
-    MAX_REACT_ROUNDS = 3
 
     def __init__(self):
         self.llm_client = OllamaClient(host=LLM_CONFIG["host"])
@@ -95,7 +94,8 @@ class ReactAgent:
 
     def react_fix(self, svo: AttackSVO, failed_command: str,
                   error_output: str, platform: str = "windows",
-                  previous_attempts: List[FixAttempt] = None) -> Optional[str]:
+                  previous_attempts: List[FixAttempt] = None,
+                  env_context: Dict = None) -> Optional[str]:
         """
         ReAct 패턴으로 실패한 command를 수정
 
@@ -105,6 +105,7 @@ class ReactAgent:
             error_output: 에러 출력
             platform: 타겟 플랫폼
             previous_attempts: 이전 시도 기록 (같은 수정 반복 방지)
+            env_context: 환경 컨텍스트 (C2 서버 주소, Agent 권한 등)
 
         Returns:
             수정된 커맨드 or None (수정 불가)
@@ -131,6 +132,24 @@ class ReactAgent:
 
         executor = "PowerShell" if platform == "windows" else "Bash/sh"
 
+        # ── 환경 정보 블록 ──────────────────────────────────────
+        env = env_context or {}
+        env_block = ""
+        c2_url = env.get("c2_server_url", "")
+        if c2_url:
+            agent_host = env.get("agent_host", "")
+            agent_privilege = env.get("agent_privilege", "User")
+            target_hosts = env.get("target_hosts", [])
+            env_block = f"""
+
+## ENVIRONMENT (use these REAL addresses — do NOT invent IPs)
+- C2 / Attacker Server: {c2_url}
+- Agent Host: {agent_host}
+- Agent Privilege: {agent_privilege}
+- Target Hosts: {', '.join(target_hosts) if target_hosts else 'none'}
+- When downloading/uploading: always use {c2_url} as the server URL
+- If privilege is 'User': avoid admin-only commands"""
+
         # ReAct 프롬프트
         system_prompt = f"""You are an expert red team operator using the ReAct framework.
 
@@ -144,6 +163,7 @@ A command has FAILED during an attack simulation. You must fix it while preservi
 - Technique: {svo.technique_id} — {svo.technique_name}
 
 ## FAILURE CLASSIFICATION: {failure_type}
+{env_block}
 
 ## RULES
 1. Output your response in this EXACT format:
@@ -157,6 +177,7 @@ A command has FAILED during an attack simulation. You must fix it while preservi
    - Use built-in OS tools (Living off the Land)
    - Be different from all previous attempts
    - Be a single line
+   - Use ONLY real addresses from the ENVIRONMENT section above
 
 3. Fix strategies by failure type:
    - verb_failure: Use a different tool/command that does the same action
@@ -207,89 +228,6 @@ Fix the command using the ReAct framework:"""
             print(f"  [!] ReAct fix error: {e}")
             return None
 
-    def run_react_loop(self, svo: AttackSVO, initial_command: str,
-                       initial_error: str, platform: str = "windows") -> Dict:
-        """
-        ReAct 루프 실행 (최대 MAX_REACT_ROUNDS회)
-
-        이 메서드는 command 수정만 하고 실제 실행은 하지 않는다.
-        실행은 pipeline이 담당한다.
-
-        Args:
-            svo: 원래 의도
-            initial_command: 처음 실패한 커맨드
-            initial_error: 첫 에러 메시지
-            platform: 타겟 플랫폼
-
-        Returns:
-            {
-                "fixed_commands": [{"command": str, "thought": str, "action": str, "failure_type": str}],
-                "attempts": int,
-                "exhausted": bool  # True이면 RetryAnalyzer로 fallback
-            }
-        """
-        print(f"\n{'='*60}")
-        print(f"ReAct LOOP: {svo.technique_id}")
-        print(f"  SVO: {svo.intent_summary()}")
-        print(f"  Initial error: {initial_error[:100]}")
-        print(f"{'='*60}")
-
-        attempts: List[FixAttempt] = []
-        fixed_commands = []
-        current_command = initial_command
-        current_error = initial_error
-
-        for round_num in range(1, self.MAX_REACT_ROUNDS + 1):
-            print(f"\n  --- Round {round_num}/{self.MAX_REACT_ROUNDS} ---")
-
-            failure_type = self.classify_failure(current_error)
-            print(f"  Failure type: {failure_type}")
-
-            # ReAct 수정 시도
-            fixed_command = self.react_fix(
-                svo=svo,
-                failed_command=current_command,
-                error_output=current_error,
-                platform=platform,
-                previous_attempts=attempts
-            )
-
-            if not fixed_command:
-                print(f"  [!] ReAct could not produce a fix — exhausted")
-                break
-
-            # 수정 기록 저장
-            attempt = FixAttempt(
-                attempt=round_num,
-                command=current_command,
-                error=current_error[:300],
-                failure_type=failure_type,
-                thought="",  # _parse_react_output에서 이미 출력함
-                action=""
-            )
-            attempts.append(attempt)
-
-            fixed_commands.append({
-                "round": round_num,
-                "command": fixed_command,
-                "failure_type": failure_type,
-                "original_error": current_error[:300],
-            })
-
-            # 다음 라운드를 위해 current를 업데이트
-            # (실제 실행 + 성공/실패 판단은 pipeline에서)
-            current_command = fixed_command
-
-            # 여기서는 첫 번째 수정 커맨드만 반환하고,
-            # pipeline이 실행 후 다시 이 메서드를 호출하는 구조
-            break
-
-        return {
-            "fixed_commands": fixed_commands,
-            "attempts": len(attempts),
-            "exhausted": len(fixed_commands) == 0,
-            "svo": svo.to_dict(),
-        }
 
     def update_ability_command(self, ability_id: str, new_command: str,
                                 svo: AttackSVO, platform: str = "windows") -> Optional[Dict]:

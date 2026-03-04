@@ -55,7 +55,34 @@ class CalderaClient:
             print(f"  [!] API request failed: {url} - {e}")
             return None
 
-    # ==================== Agents ====================
+    # ==================== Payloads ====================
+
+    def list_payloads(self) -> List[str]:
+        """
+        Caldera에 등록된 payload 파일 목록 반환
+
+        Returns:
+            payload 파일명 리스트 (예: ['821ca9_T1105.bat', '411da5_AtomicService.exe', ...])
+        """
+        try:
+            resp = self._request("GET", "payloads")
+            if isinstance(resp, list):
+                return resp
+            # _request가 dict로 감싸서 왔을 때 (raw)
+            if isinstance(resp, dict) and "payloads" in resp:
+                return resp["payloads"]
+            return []
+        except Exception as e:
+            print(f"  [!] Failed to fetch payloads: {e}")
+            return []
+
+    def get_payload_url(self, filename: str) -> str:
+        """
+        Caldera payload 다운로드 URL 반환
+        에이전트에서 다운로드 가능한 URL 형식
+        """
+        return f"{self.base_url}/file/download?file={filename}"
+
 
     def get_agents(self) -> List[Dict]:
         """모든 에이전트 목록"""
@@ -150,6 +177,30 @@ class CalderaClient:
                 return result
 
         return result
+
+    def get_link_output(self, operation_id: str, link_id: str) -> str:
+        """
+        Link의 실제 실행 출력(stdout/stderr)을 가져옴.
+        Caldera는 output을 base64로 인코딩해서 저장함.
+
+        Returns:
+            디코딩된 출력 문자열 (없으면 빈 문자열)
+        """
+        import base64
+        result = self._request("GET", f"operations/{operation_id}/links/{link_id}/result")
+        if not result:
+            return ""
+
+        # result 필드가 base64 인코딩된 출력
+        raw = result.get("link", {}).get("output", "") or result.get("output", "")
+        if not raw or raw in ("True", "False", "true", "false"):
+            return raw  # 이미 디코딩된 plain text
+
+        try:
+            decoded = base64.b64decode(raw).decode("utf-8", errors="replace")
+            return decoded.strip()
+        except Exception:
+            return raw
 
     def create_ability(self, name: str, description: str,
                        tactic: str, technique_id: str, technique_name: str,
@@ -318,6 +369,22 @@ class CalderaClient:
 
         return result
 
+    def delete_operation(self, operation_id: str) -> bool:
+        """Operation 삭제"""
+        result = self._request("DELETE", f"operations/{operation_id}")
+        if result is not None:
+            print(f"  ✓ Operation deleted: {operation_id}")
+            return True
+        return False
+
+    def delete_adversary(self, adversary_id: str) -> bool:
+        """Adversary 삭제"""
+        result = self._request("DELETE", f"adversaries/{adversary_id}")
+        if result is not None:
+            print(f"  ✓ Adversary deleted: {adversary_id}")
+            return True
+        return False
+
     def get_operations(self) -> List[Dict]:
         """모든 오퍼레이션 목록"""
         result = self._request("GET", "operations")
@@ -412,6 +479,7 @@ class CalderaClient:
         )
 
         if operation:
+            operation['s2c_adversary_id'] = adversary_id
             print(f"\n✓ Operation created successfully!")
             print(f"  Operation ID: {operation.get('id')}")
             print(f"  Name: {operation.get('name')}")

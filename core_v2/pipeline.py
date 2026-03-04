@@ -20,7 +20,7 @@ from core_v2.caldera_client import CalderaClient
 from core_v2.retry_analyzer import RetryAnalyzer
 from core_v2.svo_extractor import SVOExtractor, AttackSVO
 from core_v2.ability_generator import AbilityGenerator
-from core_v2.react_agent import ReactAgent
+from core_v2.react_agent import ReactAgent, FixAttempt
 
 
 class Pipeline:
@@ -34,13 +34,33 @@ class Pipeline:
         self.ability_generator = AbilityGenerator()
         self.react_agent = ReactAgent()
 
-    def run(self, scenario_file: str, output_dir: str = None) -> Optional[Tuple[Path, str]]:
+        # Cleanup 추적용
+        self._created_abilities = []
+        self._created_adversaries = []
+        self._created_operations = []
+
+    def cleanup(self):
+        """파이프라인 실행 중 생성된 임시 커스텀 Ability만 삭제
+        (Operation과 Adversary는 Caldera UI에서 확인할 수 있도록 남겨둠)
+        """
+        self._print_header("CLEANUP CALDERA OBJECTS")
+        print("[*] Removing generated custom abilities from Caldera...")
+
+        # Abilities만 삭제 (Operation, Adversary는 유지)
+        for ab_id in set(self._created_abilities):
+            self.caldera.delete_ability(ab_id)
+
+        print(f"  ✓ Cleanup complete. (Operations/Adversaries kept in Caldera)")
+
+    def run(self, scenario_file: str, output_dir: str = None,
+             force_generate: bool = False) -> Optional[Tuple[Path, str]]:
         """
         전체 파이프라인 실행
 
         Args:
             scenario_file: 시나리오 파일 경로
             output_dir: 결과 저장 디렉토리 (기본: results/)
+            force_generate: True이면 기존 Caldera ability를 무시하고 SVO로만 생성 (실험용)
 
         Returns:
             (session_dir, operation_id) 또는 None
@@ -137,10 +157,35 @@ class Pipeline:
         platform = agent.get('platform', 'windows') if agent else 'windows'
         print(f"\n[*] Agent: {selected_agent} (platform: {platform})")
 
+        # 환경 컨텍스트 수집 (LLM이 실제 주소를 커맨드에 넣도록)
+        from config import CALDERA_CONFIG
+        target_hosts = []
+        for a in agents:
+            host_ip = a.get('host_ip_addrs', [])
+            if isinstance(host_ip, list):
+                target_hosts.extend(host_ip)
+            elif isinstance(host_ip, str) and host_ip:
+                target_hosts.append(host_ip)
+
+        agent_info = {
+            "c2_server_url": CALDERA_CONFIG["url"],
+            "host": agent.get('host', '') if agent else '',
+            "privilege": agent.get('privilege', 'User') if agent else 'User',
+            "target_hosts": list(set(target_hosts)),  # 중복 제거
+            "payloads": self.caldera.list_payloads(),  # Caldera에 있는 실제 payload 목록
+            "payload_download_url_format": f"{CALDERA_CONFIG['url']}/file/download?file=<filename>",
+        }
+
         # 모든 technique에 대해 ability 확보 (기존 or 생성)
         ability_results = self.ability_generator.generate_abilities_for_plan(
-            all_techniques, platform=platform
+            all_techniques, platform=platform, force_generate=force_generate,
+            agent_info=agent_info
         )
+
+        if ability_results:
+            for ab in ability_results:
+                if ab.get('source') == 'generated' and ab.get('ability_id'):
+                    self._created_abilities.append(ab.get('ability_id'))
 
         if not ability_results:
             print("\n[!] No abilities available for any technique!")
@@ -198,6 +243,11 @@ class Pipeline:
             auto_start=True
         )
 
+        if operation:
+            self._created_operations.append(operation.get('id'))
+            if operation.get('s2c_adversary_id'):
+                self._created_adversaries.append(operation.get('s2c_adversary_id'))
+
         if not operation:
             print("\n[!] Failed to create operation")
             return None
@@ -220,115 +270,200 @@ class Pipeline:
                                          result_filename="06_operation_results.json")
 
         # ==================================================================
-        # PHASE 6: ReAct 자율 수정 → RetryAnalyzer Fallback
+        # PHASE 6: ReAct Operation-Level Loop (최대 3라운드)
         # ==================================================================
+        MAX_REACT_ROUNDS = 3
         retry_result = None
-        react_results = []
+        react_history = []       # 라운드별 기록
+        current_results = results
+        current_op_id = operation_id
 
-        if results and results.get('stats', {}).get('failed', 0) > 0:
-            self._print_header("PHASE 6: ReAct Self-Fix Loop")
+        if current_results and current_results.get('stats', {}).get('failed', 0) > 0:
+            self._print_header("PHASE 6: ReAct Operation Loop")
 
-            # 실패한 link 추출
-            failed_links = [
-                link for link in results.get('links', [])
+            for round_num in range(1, MAX_REACT_ROUNDS + 1):
+                # ── 실패한 link 추출 ────────────────────────────────
+                failed_links = [
+                    link for link in current_results.get('links', [])
+                    if link.get('status', -1) != 0
+                ]
+
+                if not failed_links:
+                    print(f"\n  ✅ All commands succeeded at round {round_num}!")
+                    break
+
+                print(f"\n{'─'*60}")
+                print(f"  ROUND {round_num}/{MAX_REACT_ROUNDS}: {len(failed_links)} failed commands")
+                print(f"{'─'*60}")
+
+                round_fixes = []
+
+                for i, link in enumerate(failed_links, 1):
+                    ability = link.get('ability', {})
+                    tech_id = ability.get('technique_id', 'Unknown')
+                    ability_id = ability.get('ability_id', '')
+                    link_id = link.get('id', '')
+
+                    # ── 실제 에러 메시지 추출 ─────────────────────────
+                    raw_output = link.get('output', '')
+                    if raw_output in ('True', 'False', 'true', 'false', ''):
+                        real_output = self.caldera.get_link_output(current_op_id, link_id)
+                        error = real_output if real_output else f"Exit code: {link.get('status', -1)}"
+                    else:
+                        error = raw_output
+
+                    # ── SVO 찾기 ─────────────────────────────────────
+                    svo_data = None
+                    for tech in all_techniques:
+                        if tech.get('technique_id') == tech_id and tech.get('svo'):
+                            svo_data = tech['svo']
+                            break
+
+                    if not svo_data:
+                        print(f"  [{i}] {tech_id}: No SVO — skip")
+                        round_fixes.append({
+                            "technique_id": tech_id,
+                            "ability_id": ability_id,
+                            "status": "skipped",
+                            "reason": "no_svo"
+                        })
+                        continue
+
+                    svo = AttackSVO(**svo_data)
+
+                    # ── 이전 시도 이력 구성 ──────────────────────────
+                    prev_attempts = []
+                    for prev_round in react_history:
+                        for prev_fix in prev_round.get('fixes', []):
+                            if prev_fix.get('technique_id') == tech_id and prev_fix.get('fixed_command'):
+                                prev_attempts.append(FixAttempt(
+                                    attempt=prev_round['round'],
+                                    command=prev_fix['fixed_command'],
+                                    error=prev_fix.get('error', '')[:300],
+                                    failure_type=prev_fix.get('failure_type', 'unknown'),
+                                    thought="", action=""
+                                ))
+
+                    # ── 원래 command 추출 ─────────────────────────────
+                    executors = ability.get('executors', [])
+                    original_cmd = executors[0].get('command', '') if executors else ''
+
+                    print(f"  [{i}] {tech_id} ({svo.verb} → {svo.object})")
+                    print(f"      Error: {error[:120]}")
+
+                    # ── ReAct 수정 (1개 커맨드 생성) ──────────────────
+                    fixed_cmd = self.react_agent.react_fix(
+                        svo=svo,
+                        failed_command=original_cmd,
+                        error_output=error[:500],
+                        platform=platform,
+                        previous_attempts=prev_attempts,
+                        env_context=agent_info
+                    )
+
+                    fix_record = {
+                        "technique_id": tech_id,
+                        "ability_id": ability_id,
+                        "original_command": original_cmd[:200],
+                        "error": error[:300],
+                        "failure_type": self.react_agent.classify_failure(error),
+                    }
+
+                    if fixed_cmd:
+                        # ability 업데이트
+                        self.react_agent.update_ability_command(
+                            ability_id, fixed_cmd, svo, platform
+                        )
+                        fix_record["fixed_command"] = fixed_cmd
+                        fix_record["status"] = "patched"
+                    else:
+                        fix_record["status"] = "no_fix"
+                        print(f"      [!] ReAct could not fix — skipping")
+
+                    round_fixes.append(fix_record)
+
+                # ── 라운드 기록 저장 ─────────────────────────────────
+                patched_count = sum(1 for f in round_fixes if f.get('status') == 'patched')
+                round_record = {
+                    "round": round_num,
+                    "failed_count": len(failed_links),
+                    "patched_count": patched_count,
+                    "fixes": round_fixes
+                }
+                react_history.append(round_record)
+
+                if patched_count == 0:
+                    print(f"\n  [!] No fixes produced in round {round_num} — stopping")
+                    break
+
+                print(f"\n  ✓ Patched {patched_count}/{len(failed_links)} abilities")
+
+                # ── 전체 Operation 재실행 ────────────────────────────
+                print(f"\n  → Re-executing full operation (Round {round_num})...")
+
+                retry_op_plan = {
+                    "name": f"{operation_plan.get('name', 'S2C')}_R{round_num}",
+                    "description": f"ReAct round {round_num} — {patched_count} commands fixed",
+                    "steps": attack_chain
+                }
+
+                retry_op = self.caldera.create_operation_from_plan(
+                    retry_op_plan,
+                    agent_paw=selected_agent,
+                    auto_start=True
+                )
+
+                if retry_op:
+                    self._created_operations.append(retry_op.get('id'))
+                    if retry_op.get('s2c_adversary_id'):
+                        self._created_adversaries.append(retry_op.get('s2c_adversary_id'))
+
+                if not retry_op:
+                    print(f"  [!] Failed to create retry operation")
+                    break
+
+                retry_op_id = retry_op.get('id')
+                current_op_id = retry_op_id
+
+                round_results = self._wait_and_collect(
+                    retry_op_id, session_dir,
+                    result_filename=f"07_react_round_{round_num}.json"
+                )
+
+                if not round_results:
+                    print(f"  [!] Failed to collect retry results")
+                    break
+
+                # ── 결과 비교 ────────────────────────────────────────
+                prev_success = current_results.get('stats', {}).get('success', 0)
+                new_success = round_results.get('stats', {}).get('success', 0)
+                new_failed = round_results.get('stats', {}).get('failed', 0)
+                print(f"\n  📊 Round {round_num} result: success {prev_success} → {new_success} (failed: {new_failed})")
+
+                round_record['result_stats'] = round_results.get('stats', {})
+                round_record['operation_id'] = retry_op_id
+
+                current_results = round_results
+
+                if new_failed == 0:
+                    print(f"\n  🎉 All commands succeeded after {round_num} rounds!")
+                    break
+
+            # ── 라운드 전체 기록 저장 ────────────────────────────────
+            self._save_json(session_dir / "07_react_summary.json", {
+                "total_rounds": len(react_history),
+                "rounds": react_history
+            })
+
+            # ── 최종 실패 → RetryAnalyzer fallback ───────────────────
+            final_failed = [
+                link for link in current_results.get('links', [])
                 if link.get('status', -1) != 0
             ]
 
-            print(f"\n[*] {len(failed_links)} failed commands detected")
-
-            for i, link in enumerate(failed_links, 1):
-                ability = link.get('ability', {})
-                tech_id = ability.get('technique_id', 'Unknown')
-                ability_id = ability.get('ability_id', '')
-                error = link.get('output', '') or f"Exit code: {link.get('status', -1)}"
-
-                # 이 technique의 SVO 찾기
-                svo_data = None
-                for tech in all_techniques:
-                    if tech.get('technique_id') == tech_id and tech.get('svo'):
-                        svo_data = tech['svo']
-                        break
-
-                if not svo_data:
-                    print(f"\n  [{i}] {tech_id}: No SVO — skipping ReAct")
-                    continue
-
-                svo = AttackSVO(**svo_data)
-
-                # 원래 command 추출
-                executors = ability.get('executors', [])
-                original_cmd = executors[0].get('command', '') if executors else ''
-
-                print(f"\n  [{i}] ReAct for {tech_id}: {svo.intent_summary()}")
-
-                react_result = self.react_agent.run_react_loop(
-                    svo=svo,
-                    initial_command=original_cmd,
-                    initial_error=error[:500],
-                    platform=platform
-                )
-
-                react_results.append({
-                    "technique_id": tech_id,
-                    "ability_id": ability_id,
-                    **react_result
-                })
-
-                # ReAct 수정이 있으면 ability 업데이트
-                if react_result.get('fixed_commands') and not react_result.get('exhausted'):
-                    new_cmd = react_result['fixed_commands'][0]['command']
-                    self.react_agent.update_ability_command(
-                        ability_id, new_cmd, svo, platform
-                    )
-
-            self._save_json(session_dir / "07_react_fixes.json", {
-                "total_failed": len(failed_links),
-                "react_results": react_results,
-            })
-
-            # ReAct로 수정된 ability가 있으면 새 Operation 실행
-            fixed_ability_ids = [
-                r['ability_id'] for r in react_results
-                if r.get('fixed_commands') and not r.get('exhausted')
-            ]
-
-            if fixed_ability_ids:
-                self._print_header("PHASE 6b: Re-executing Fixed Abilities")
-                print(f"\n[*] {len(fixed_ability_ids)} abilities were fixed by ReAct")
-
-                # 수정된 ability들로 새 Operation 생성
-                retry_plan = {
-                    "name": f"{operation_plan.get('name', 'S2C')}_ReAct",
-                    "description": "ReAct self-fixed retry operation",
-                    "steps": [
-                        step for step in attack_chain
-                        if step.get('ability_id') in fixed_ability_ids
-                    ]
-                }
-
-                if retry_plan['steps']:
-                    retry_op = self.caldera.create_operation_from_plan(
-                        retry_plan,
-                        agent_paw=selected_agent,
-                        auto_start=True
-                    )
-
-                    if retry_op:
-                        retry_op_id = retry_op.get('id')
-                        react_op_results = self._wait_and_collect(
-                            retry_op_id, session_dir,
-                            result_filename="08_react_retry_results.json"
-                        )
-
-            # ReAct로 해결 못한 건 → RetryAnalyzer fallback
-            exhausted_techs = [
-                r['technique_id'] for r in react_results
-                if r.get('exhausted')
-            ]
-
-            if exhausted_techs:
-                self._print_header("PHASE 6c: RetryAnalyzer Fallback")
-                print(f"\n[*] {len(exhausted_techs)} techniques exhausted ReAct — falling back")
+            if final_failed:
+                self._print_header("PHASE 7: RetryAnalyzer Fallback")
+                print(f"\n[*] {len(final_failed)} commands still failed after ReAct — falling back")
 
                 agent_info = {
                     "platform": platform,
@@ -339,26 +474,34 @@ class Pipeline:
                 retry_name = f"{operation_plan.get('name', 'S2C')}_Fallback"
 
                 retry_result = retry_analyzer.run(
-                    operation_results=results,
+                    operation_results=current_results,
                     agent_info=agent_info,
                     agent_paw=selected_agent,
                     retry_name=retry_name
                 )
 
                 if retry_result:
-                    self._save_json(session_dir / "09_fallback_analysis.json", {
-                        "exhausted_techniques": exhausted_techs,
+                    self._save_json(session_dir / "08_fallback_analysis.json", {
+                        "remaining_failures": len(final_failed),
                         "recommendations": retry_result.get('recommendations', []),
                         "alternatives": retry_result.get('alternatives', []),
                     })
 
-                    retry_op = retry_result.get('retry_operation')
-                    if retry_op:
-                        retry_op_id = retry_op.get('id')
-                        self._print_header("PHASE 6d: Waiting for Fallback Operation")
+                    fallback_op = retry_result.get('retry_operation')
+                    if fallback_op:
+                        self._created_operations.append(fallback_op.get('id'))
+                        if fallback_op.get('s2c_adversary_id'):
+                            self._created_adversaries.append(fallback_op.get('s2c_adversary_id'))
+                        elif fallback_op.get('adversary'):
+                            adv_id = fallback_op.get('adversary', {}).get('adversary_id')
+                            if adv_id:
+                                self._created_adversaries.append(adv_id)
+
+                        fallback_op_id = fallback_op.get('id')
+                        self._print_header("PHASE 7b: Waiting for Fallback Operation")
                         fallback_results = self._wait_and_collect(
-                            retry_op_id, session_dir,
-                            result_filename="10_fallback_results.json"
+                            fallback_op_id, session_dir,
+                            result_filename="09_fallback_results.json"
                         )
                         if fallback_results:
                             retry_result['retry_stats'] = fallback_results.get('stats', {})
@@ -377,7 +520,7 @@ class Pipeline:
         print(f"    Total Techniques:     {validation.get('total')}")
         print(f"    Executable:           {validation.get('executable')} ({validation.get('coverage_rate', 0):.1f}%)")
         print(f"    Attack Chain Steps:   {len(attack_chain)}")
-        print(f"    Operation ID:         {operation_id}")
+        print(f"    Initial Operation:    {operation_id}")
         print(f"    Target Agent:         {selected_agent}")
 
         if results:
@@ -386,20 +529,27 @@ class Pipeline:
             success = stats.get('success', 0)
             failed = stats.get('failed', 0)
             rate = (success / total * 100) if total > 0 else 0
-            print(f"    Commands Executed:     {total}")
-            print(f"    ✓ Success:            {success} ({rate:.1f}%)")
-            print(f"    ✗ Failed:             {failed}")
+            print(f"\n    Initial Execution:")
+            print(f"    ✓ Success:            {success}/{total} ({rate:.1f}%)")
+
+        if react_history:
+            last_round = react_history[-1]
+            last_stats = last_round.get('result_stats', {})
+            if last_stats:
+                final_success = last_stats.get('success', 0)
+                final_total = last_stats.get('total', 0)
+                final_rate = (final_success / final_total * 100) if final_total > 0 else 0
+                print(f"\n    After ReAct ({len(react_history)} rounds):")
+                print(f"    ✓ Success:            {final_success}/{final_total} ({final_rate:.1f}%)")
 
         if retry_result:
-            alts = retry_result.get('alternatives', [])
             retry_stats = retry_result.get('retry_stats', {})
-            print(f"\n    🔄 Retry:")
-            print(f"    Alternative abilities: {len(alts)}")
             if retry_stats:
-                r_total = retry_stats.get('total', 0)
                 r_success = retry_stats.get('success', 0)
+                r_total = retry_stats.get('total', 0)
                 r_rate = (r_success / r_total * 100) if r_total > 0 else 0
-                print(f"    Retry Success:        {r_success}/{r_total} ({r_rate:.1f}%)")
+                print(f"\n    After Fallback:")
+                print(f"    ✓ Success:            {r_success}/{r_total} ({r_rate:.1f}%)")
 
         print(f"\n📁 Generated Files:")
         print(f"    {session_dir}/")
@@ -410,13 +560,13 @@ class Pipeline:
         print(f"    ├── 04_attack_chain.json")
         print(f"    ├── 05_created_operation.json")
         print(f"    ├── 06_operation_results.json")
-        if react_results:
-            print(f"    ├── 07_react_fixes.json")
-            if fixed_ability_ids:
-                print(f"    ├── 08_react_retry_results.json")
+        if react_history:
+            for rh in react_history:
+                print(f"    ├── 07_react_round_{rh['round']}.json")
+            print(f"    ├── 07_react_summary.json")
         if retry_result and retry_result.get('retry_operation'):
-            print(f"    ├── 09_fallback_analysis.json")
-            print(f"    ├── 10_fallback_results.json")
+            print(f"    ├── 08_fallback_analysis.json")
+            print(f"    ├── 09_fallback_results.json")
         print(f"    └── session_info.json")
 
         print(f"\n🔗 Caldera UI:")

@@ -34,18 +34,60 @@ class AbilityGenerator:
         self.model = LLM_CONFIG["model"]
         self.caldera = CalderaClient()
 
-    def generate_command(self, svo: AttackSVO, platform: str = "windows") -> Optional[str]:
+    def generate_command(self, svo: AttackSVO, platform: str = "windows",
+                         env_context: Dict = None) -> Optional[str]:
         """
         SVO → 실행 가능한 쉘 커맨드 생성
 
         Args:
             svo: AttackSVO 트리플릿
             platform: 타겟 플랫폼
+            env_context: 환경 컨텍스트 (C2 서버 주소, Agent 권한 등)
 
         Returns:
             생성된 커맨드 문자열 or None
         """
         executor = self.PLATFORM_EXECUTORS.get(platform, "psh")
+        env = env_context or {}
+
+        # ── 환경 정보 블록 구성 ──────────────────────────────────
+        env_block = ""
+        c2_url = env.get("c2_server_url", "")
+        agent_host = env.get("agent_host", "")
+        agent_privilege = env.get("agent_privilege", "User")
+        target_hosts = env.get("target_hosts", [])
+
+        payloads = env.get("payloads", [])
+        payload_url_fmt = env.get("payload_download_url_format", "")
+
+        # payload 목록 요약 (exe/bat/ps1/dll 등 실행 가능한 것만 표시, 최대 15개)
+        useful_payloads = [p for p in payloads if any(p.endswith(ext) for ext in
+            ('.exe', '.bat', '.ps1', '.dll', '.vbs', '.py', '.xml', '.sh', '.txt'))]
+        payload_hint = ''
+        if useful_payloads:
+            sample = useful_payloads[:15]
+            payload_hint = f"""
+- Available Caldera Payloads (REAL files you can reference):
+  Download URL format: {payload_url_fmt}
+  Files: {', '.join(sample)}{' ...' if len(useful_payloads) > 15 else ''}
+  → If the command needs to download a file, USE ONE OF THESE real filenames above!"""
+
+        if c2_url or agent_host:
+            env_block = f"""
+
+ENVIRONMENT (use these REAL values in the command — do NOT invent addresses):
+- C2 / Attacker Server: {c2_url}  ← use this for ANY download, upload, or exfiltration URL
+- Agent Host: {agent_host}
+- Agent Privilege: {agent_privilege}
+- Target Hosts for lateral movement: {', '.join(target_hosts) if target_hosts else 'none available'}{payload_hint}
+
+CRITICAL ADDRESS RULES:
+- When downloading files from attacker: use {c2_url} as the base URL (NOT 127.0.0.1, NOT example.com)
+- When exfiltrating/uploading data: upload to {c2_url} (NOT random IPs)
+- For lateral movement targets: use one of the Target Hosts listed above
+- If you need to download a file: use the payload download URL format above with a REAL filename from the list
+- If a file is needed locally but doesn't exist, CREATE it first (e.g. echo/New-Item) before using it
+- If privilege is 'User', do NOT use commands requiring admin/SYSTEM (no sc.exe create, no schtasks /RU SYSTEM)"""
 
         system_prompt = f"""You are an expert red team operator generating commands for attack simulation.
 
@@ -53,6 +95,7 @@ CONTEXT:
 - Platform: {platform}
 - Executor: {"PowerShell" if executor == "psh" else "Bash/sh" if executor == "sh" else "cmd"}
 - This is for a CONTROLLED security test environment with an authorized Caldera agent
+{env_block}
 
 YOUR TASK:
 Generate a SINGLE executable command that performs the described attack action.
@@ -64,7 +107,8 @@ RULES:
 4. For PowerShell: do NOT use Write-Host for output, use actual operational commands
 5. For sh: ensure POSIX compatibility
 6. Prefer "Living off the Land" (LotL) techniques — use native OS tools
-7. Output ONLY the command, nothing else — no explanation, no markdown"""
+7. Output ONLY the command, nothing else — no explanation, no markdown
+8. ALL network addresses must come from the ENVIRONMENT section above — never invent IPs or hostnames"""
 
         user_prompt = f"""Generate a {platform} command for this attack action:
 
@@ -161,7 +205,8 @@ Is this command valid for the intent?"""
             return {"valid": True, "reason": "Validation skipped due to error", "risk_level": "medium"}
 
     def generate_ability(self, svo: AttackSVO, platform: str = "windows",
-                         max_attempts: int = 3) -> Optional[Dict]:
+                         max_attempts: int = 3,
+                         env_context: Dict = None) -> Optional[Dict]:
         """
         SVO → Caldera Ability 생성 (API 등록까지)
 
@@ -169,6 +214,7 @@ Is this command valid for the intent?"""
             svo: AttackSVO
             platform: 타겟 플랫폼
             max_attempts: 최대 생성 시도 횟수
+            env_context: 환경 컨텍스트 (C2 서버 URL, Agent 정보 등)
 
         Returns:
             생성된 Caldera ability 정보 or None
@@ -185,7 +231,7 @@ Is this command valid for the intent?"""
             print(f"\n  [Attempt {attempt}/{max_attempts}]")
 
             # 1. 커맨드 생성
-            command = self.generate_command(svo, platform)
+            command = self.generate_command(svo, platform, env_context=env_context)
             if not command:
                 print(f"  [!] Command generation failed")
                 continue
@@ -238,8 +284,27 @@ Is this command valid for the intent?"""
         print(f"\n  [!] Ability generation failed after {max_attempts} attempts")
         return None
 
+    def _build_env_context(self, agent_info: Optional[Dict]) -> Dict:
+        """
+        agent_info로부터 LLM 프롬프트에 사용할 환경 컨텍스트를 구성
+        """
+        if not agent_info:
+            return {}
+
+        env_context = {
+            "c2_server_url": agent_info.get("c2_server_url", ""),
+            "agent_host": agent_info.get("host", ""),
+            "agent_privilege": agent_info.get("privilege", "User"),
+            "target_hosts": agent_info.get("target_hosts", []),
+            "payloads": agent_info.get("payloads", []),
+            "payload_download_url_format": agent_info.get("payload_download_url_format", ""),
+        }
+        return env_context
+
     def generate_abilities_for_plan(self, techniques: List[Dict],
-                                     platform: str = "windows") -> List[Dict]:
+                                     platform: str = "windows",
+                                     force_generate: bool = False,
+                                     agent_info: Dict = None) -> List[Dict]:
         """
         공격 체인 전체에 대해 ability를 확보 (기존 선택 or 신규 생성)
 
@@ -247,6 +312,9 @@ Is this command valid for the intent?"""
             techniques: validated_data의 techniques 목록
                         각 technique에 caldera_validation.selected_ability 또는 svo가 있음
             platform: 타겟 플랫폼
+            force_generate: True이면 기존 Caldera ability를 무시하고 항상 SVO로 새 ability 생성
+                            (SVO 기여도 실험용)
+            agent_info: 현재 공격에 사용될 agent의 정보 (C2 서버, 호스트, 권한 등)
 
         Returns:
             각 technique에 대한 ability 정보 리스트
@@ -254,7 +322,15 @@ Is this command valid for the intent?"""
         """
         print(f"\n{'='*80}")
         print(f"ABILITY ACQUISITION: {len(techniques)} techniques")
+        if force_generate:
+            print(f"  ⚡ FORCE GENERATE MODE — skipping existing abilities")
         print(f"{'='*80}")
+
+        # ── 환경 컨텍스트 구성 ───────────────────────────────────
+        env_context = self._build_env_context(agent_info)
+        if env_context.get("c2_server_url"):
+            print(f"  🌐 C2 Server: {env_context['c2_server_url']}")
+            print(f"  🖥️  Agent: {env_context.get('agent_host', '?')} (privilege: {env_context.get('agent_privilege', '?')})")
 
         results = []
         stats = {"existing": 0, "generated": 0, "failed": 0}
@@ -266,9 +342,9 @@ Is this command valid for the intent?"""
 
             print(f"\n[{i}/{len(techniques)}] {tech_id}: {tech_name}")
 
-            # Case 1: 기존 ability가 있으면 그대로 사용
+            # Case 1: 기존 ability 사용 (force_generate이면 skip)
             selected = validation.get("selected_ability")
-            if selected:
+            if selected and not force_generate:
                 print(f"  → Using existing ability: {selected.get('name')}")
                 results.append({
                     "technique_id": tech_id,
@@ -280,11 +356,14 @@ Is this command valid for the intent?"""
                 stats["existing"] += 1
                 continue
 
+            if selected and force_generate:
+                print(f"  → [SKIP] existing '{selected.get('name')}' — force generating from SVO")
+
             # Case 2: SVO가 있으면 ability 생성 시도
             svo_data = tech.get("svo")
             if svo_data:
                 svo = AttackSVO(**svo_data)
-                generated = self.generate_ability(svo, platform)
+                generated = self.generate_ability(svo, platform, env_context=env_context)
 
                 if generated:
                     results.append({
