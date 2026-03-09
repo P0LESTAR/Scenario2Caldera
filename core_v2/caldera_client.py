@@ -83,7 +83,7 @@ class CalderaClient:
         """
         return f"{self.base_url}/file/download?file={filename}"
 
-
+    # ==================== Agents ====================
     def get_agents(self) -> List[Dict]:
         """모든 에이전트 목록"""
         result = self._request("GET", "agents")
@@ -96,6 +96,12 @@ class CalderaClient:
             if agent.get("paw") == paw:
                 return agent
         return None
+
+    def update_agent(self, paw: str, data: Dict) -> bool:
+        """에이전트 정보(sleep, group 등) 업데이트"""
+        endpoint = f"agents/{paw}"
+        result = self._request("PATCH", endpoint, json=data)
+        return result is not None
 
     def list_agents(self) -> List[Dict]:
         """
@@ -191,16 +197,23 @@ class CalderaClient:
         if not result:
             return ""
 
-        # result 필드가 base64 인코딩된 출력
-        raw = result.get("link", {}).get("output", "") or result.get("output", "")
+        # Caldera /result 응답 구조:
+        #   { "link": { "output": "True"/"False", ... }, "result": "<base64 encoded stdout>" }
+        # 실제 출력은 "result" 키에 base64로 들어옴
+        raw = result.get("result", "") or result.get("link", {}).get("output", "")
+
+        # boolean 또는 string 불리언 → 실제 텍스트 없음
+        if isinstance(raw, bool):
+            return ""
         if not raw or raw in ("True", "False", "true", "false"):
-            return raw  # 이미 디코딩된 plain text
+            return ""
 
         try:
             decoded = base64.b64decode(raw).decode("utf-8", errors="replace")
             return decoded.strip()
         except Exception:
-            return raw
+            # base64 아닌 경우 plain text로 반환
+            return str(raw).strip()
 
     def create_ability(self, name: str, description: str,
                        tactic: str, technique_id: str, technique_name: str,
@@ -616,5 +629,10 @@ class CalderaClient:
             print(f"       PID: {link.get('pid', 'N/A')}")
 
             output = link.get('output', '')
-            if output and output != 'False':
-                print(f"       Output: {output[:100]}...")
+            if not output or output in ('True', 'False', 'true', 'false'):
+                op_id = operation.get('id', '')
+                link_id = link.get('id') or link.get('unique', '')
+                if op_id and link_id:
+                    output = self.get_link_output(op_id, link_id)
+            if output and output not in ('True', 'False', 'true', 'false', ''):
+                print(f"       Output: {output[:200]}")

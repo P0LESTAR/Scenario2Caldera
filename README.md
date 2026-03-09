@@ -1,77 +1,144 @@
 # Scenario2Caldera v2
 
-자연어로 작성된 위협 시나리오 보고서(CTI)를 파싱하여, MITRE ATT&CK 기반의 Caldera Operation으로 자동 변환하고 스스로 에러를 수정하며 실행하는 지능형 파이프라인.
+**연구 주제: SVO 의미 제약 기반 공격 명령어 자가 복구 시 생성 명령어 특성 분석**
 
-## 주요 기능 (v2 파이프라인)
+자연어 CTI 보고서(위협 시나리오)를 파싱하여 MITRE ATT&CK 기반 Caldera Operation으로 자동 변환하고, 실패한 명령어를 SVO(Subject-Verb-Object) 의미 제약 하에 자율적으로 수정·재실행하는 지능형 파이프라인.
 
-1. **Scenario Parsing** — LLM을 통해 텍스트 시나리오에서 MITRE ATT&CK 기법, Tactic 파싱
-2. **Technique Validation** — Caldera 내 기존 Ability 존재 유무 분석 (Sub-technique → Parent fallback)
-3. **SVO Extraction** — 각 기법들의 공격 의도를 담은 주어-동사-목적어(SVO) 트리플릿 추출
-4. **Ability Acquisition** — Caldera에 기존 Ability가 존재하면 우선 선택, 없으면 추출된 SVO를 참고하여 LLM이 **새로운 커스텀 Ability 및 스크립트(PowerShell 등)를 즉석 생성**
-5. **Attack Chain & Operation Creation** — 분석된 순서로 공격 체인(Adversary)과 Operation을 조립 및 자동 실행 시작
-6. **ReAct Self-Fix Loop (Operation-Level)** —
-   - 일차 실행 후 발생한 에러를 분석(stderr/stdout 수집)하여, 실패한 Ability들의 Command 코드를 SVO 제약 하에 스스로 수정(Patch)합니다.
-   - 수정이 완료되면 전체 Operation을 다시 재실행합니다 (최대 3라운드 반복).
-7. **RetryAnalyzer Fallback** — ReAct 루프만으로 해결되지 않은 복구 불가 기법들을 분석하고, 비슷한 목적의 대체(Alternative) 기법을 찾아 Fallback Operation을 수행합니다.
-8. **Automatic Cleanup** — 실행 과정에서 파이프라인이 임시로 생성했던 객체들(Ability, Adversary, Operation)을 실행 종료 시점에 깔끔하게 삭제합니다.
+## 연구 목적
+
+실패한 공격 시뮬레이션 명령어를 ReAct 루프로 자가 복구할 때:
+- SVO 의미 제약(공격 의도)이 수정 과정에서 얼마나 보존되는가
+- 실패 유형(verb/object/syntax 등)에 따라 어떤 수정 패턴이 나타나는가
+- 수정된 명령어의 구조적·의미적 특성은 어떻게 변화하는가
+
+## 파이프라인 구조
+
+```
+CTI 시나리오 (.md)
+    │
+    ▼ Phase 1: Scenario Parsing
+    │   LLM → MITRE ATT&CK 기법 추출
+    │
+    ▼ Phase 2: Caldera Validation
+    │   기존 Ability 존재 여부 확인 (Sub-technique → Parent fallback)
+    │
+    ▼ Phase 2.5: SVO Extraction
+    │   각 기법의 공격 의도를 Subject-Verb-Object 트리플릿으로 추출
+    │
+    ▼ Phase 3: Ability Acquisition
+    │   기존 Ability 선택 or SVO 기반 커스텀 Ability 즉석 생성
+    │   (--force-generate: 항상 SVO 기반 신규 생성)
+    │
+    ▼ Phase 4: Attack Chain & Operation
+    │   공격 체인 조립 → Caldera Adversary/Operation 생성 및 실행
+    │
+    ▼ Phase 5: Wait for Completion
+    │   Operation 완료 폴링 (10초 간격, 타임아웃 30분)
+    │
+    ▼ Phase 6: ReAct Self-Fix Loop (최대 3라운드)
+    │   실패한 명령어 → SVO 제약 하에 수정 → 전체 Operation 재실행
+    │   수정 시 Thought / Action / SVO Focus 기록
+    │
+    ▼ Phase 7: RetryAnalyzer Fallback
+        ReAct로 해결 불가 → 대체 기법(Alternative Technique) 탐색 및 실행
+```
+
+## 핵심 모듈 (`core_v2/`)
+
+| 파일 | 역할 |
+|------|------|
+| `pipeline.py` | 전체 파이프라인 오케스트레이션 |
+| `scenario.py` | LLM 기반 시나리오 파싱 |
+| `svo_extractor.py` | SVO 트리플릿 추출 |
+| `ability_generator.py` | SVO → Caldera Ability 생성 (LLM 명령어 생성 + API 등록) |
+| `react_agent.py` | ReAct 자율 수정 에이전트 (실패 분류 → 명령어 수정) |
+| `retry_analyzer.py` | 대체 기법 추론 Fallback 엔진 |
+| `llm_orchestrator.py` | 공격 체인 순서 논리적 조립 |
+| `caldera_client.py` | Caldera REST API 클라이언트 |
 
 ## 시스템 요구사항
 
 - **Python 3.8+**
-- **Caldera Server** (API 접근 가능, 기본 8888 포트)
-- **Ollama Server** (LLM 처리용)
-- **Target Agent** — 테스트하려는 타겟 VM 머신에서 Caldera 에이전트 구동 중일 것
+- **Caldera Server** (기본 포트 8888)
+  - 파일 업로드: `POST /file/upload` (form field: `data`)
+  - 파일 다운로드: `GET /file/download` (header: `file: <filename>`)
+- **Ollama Server** (LLM 처리, temperature=0.0)
+- **Target Agent** — 대상 VM에서 Caldera 에이전트 구동 중
 
-## 로컬 환경 설정
+## 환경 설정
 
-`.env.example`을 참고하여 프로젝트 루트에 `.env` 파일을 생성합니다.
+`.env` 파일을 프로젝트 루트에 생성:
 
 ```ini
-CALDERA_URL=http://192.168.x.x:8889
+CALDERA_URL=http://192.168.x.x:8888
 CALDERA_API_KEY=YOUR_CALDERA_API_TOKEN
 OLLAMA_HOST=http://192.168.x.x:11434
-LLM_MODEL=llama3.1:70b  # 사용할 Ollama 모델 지정
+LLM_MODEL=your-model-name
 ```
 
-## 사용법
+## 실행법
 
 ```bash
-# 기본 실행 (가장 추천하는 방식 - 종료 후 임시 데이터 자동 삭제)
+# 기본 실행 (기존 Caldera Ability 우선 사용)
 python run.py scenarios/APT3_scenario.md
 
-# SVO 커스텀 생성 실험 모드 (기존 Ability 검사 무시하고 무조건 SVO 기반 신규 생성)
+# SVO 기반 강제 생성 모드 (연구용 — 기존 Ability 무시, 항상 신규 생성)
 python run.py scenarios/APT3_scenario.md --force-generate
 
-# 보존 모드 (임시 생성된 Ability/Adversary/Operation 내역을 Caldera UI에서 직접 보기 위해 삭제 방지)
+# 객체 보존 모드 (Caldera UI에서 결과 직접 확인용)
 python run.py scenarios/APT3_scenario.md --force-generate --keep-objects
+
+# Thief 시나리오 단독 테스트
+python test_thief.py
 ```
 
-## 실행 결과
+## 결과 파일 (`results/session_<timestamp>/`)
 
-파이프라인 실행 내용의 모든 상세 JSON 데이터 결과는 `results/session_<시간>/` 디렉토리에 저장됩니다:
-
-| 파일명 | 내용 요약 |
-|------|---------|
+| 파일 | 내용 |
+|------|------|
 | `01_parsed_scenario.json` | LLM 파싱 결과 (ATT&CK 기법 추출) |
-| `02_validated_scenario.json` | 추출 기법의 Caldera 등록 여부 확인 |
-| `02_5_svo_extraction.json` | 추출된 공격 의도 (Subject-Verb-Object) |
-| `03_ability_acquisition.json` | 사용할 기존 Ability 매핑 및 신규 Ability 생성 내역 |
-| `04_attack_chain.json` | 조립된 공격 체인 스텝 시퀀스 |
-| `05_created_operation.json` | 본 실행 Adversary/Operation 생성 정보 |
-| `06_operation_results.json` | 1차 오퍼레이션 실행 결과 분석 |
-| `07_react_round_*.json` | 에러 수정(ReAct) 루프 라운드별 재실행 결과 |
-| `07_react_summary.json` | ReAct 결과 전체 요약 (수정 로그, 문법 변형 추이 등) |
-| `08_fallback_analysis.json` | 남은 에러 기법들에 대한 대체 기법(Fallback) LLM 권고 사항 |
-| `09_fallback_results.json` | 대안 기법 기반의 Fallback 오퍼레이션 실행 결과 분석 |
-| `session_info.json` | 전체 세션 기본 메타데이터 |
+| `02_validated_scenario.json` | Caldera Ability 존재 여부 확인 |
+| `02_5_svo_extraction.json` | 추출된 SVO 트리플릿 (Subject / Verb / Object / Type) |
+| `03_ability_acquisition.json` | Ability 확보 내역 (기존 선택 or 신규 생성) |
+| `04_attack_chain.json` | 공격 체인 스텝 시퀀스 |
+| `05_created_operation.json` | Operation 생성 정보 |
+| `06_operation_results.json` | 초기 실행 결과 |
+| `07_react_round_*.json` | ReAct 라운드별 수정 결과 |
+| `07_react_summary.json` | ReAct 전체 요약 (SVO, 원본·수정 명령어, thought/action/svo_focus) |
+| `08_fallback_analysis.json` | RetryAnalyzer 대체 기법 권고 |
+| `09_fallback_results.json` | Fallback Operation 실행 결과 |
+| `session_info.json` | 세션 메타데이터 |
 
-## 코어 모듈 구조 (`core_v2/`)
+로그: `logs/run_<timestamp>.log` (터미널 출력 전체 기록)
 
-- `pipeline.py` — Pipeline 메인 오케스트레이션 수행 및 임시 파일 삭제 등 관리
-- `scenario.py` — ScenarioProcessor (텍스트 파싱)
-- `llm_orchestrator.py` — 단계 얽힘 파악 및 공격 체인 순서 논리적 조립
-- `caldera_client.py` — Caldera REST API 클라이언트 모듈 (삭제/등록 등 전면 컨트롤)
-- `svo_extractor.py` — SVO 트리플릿 문장 기반 추출기
-- `ability_generator.py` — SVO 제약 조건을 기반으로 한 Caldera Ability JSON 포맷 제작
-- `react_agent.py` — 에러메시지 분류기 및 재시도 프롬프트(FixAttempt 이력 포함) 기반의 자율 수정 Agent
-- `retry_analyzer.py` — 대체 기법 추론 엔진
+## ReAct 수정 기록 스키마 (`07_react_summary.json`)
+
+```json
+{
+  "technique_id": "T1041",
+  "svo": {
+    "subject": "agent",
+    "verb": "transfer",
+    "object": "zip archive",
+    "object_type": "file"
+  },
+  "original_command": "...",
+  "fixed_command": "...",
+  "failure_type": "unknown | verb_failure | object_failure | ...",
+  "thought": "LLM의 실패 원인 분석",
+  "action": "수정 전략 설명",
+  "svo_focus": "수정 시 집중한 SVO 구성요소",
+  "status": "patched | skipped"
+}
+```
+
+## ReAct 실패 분류 체계
+
+| failure_type | 의미 | SVO 집중 구성요소 |
+|-------------|------|----------------|
+| `verb_failure` | 명령어/도구 미존재 | V — 동일 동작의 다른 도구로 교체 |
+| `object_failure` | 대상 경로/파일 미존재 | O — 대상 탐색 방식 변경 |
+| `subject_failure` | 권한 부족 | S — 권한 상승 래핑 시도 |
+| `syntax_failure` | 플랫폼 문법 오류 | V+O — 플랫폼 호환 문법으로 수정 |
+| `env_failure` | 환경 도구 미설치 | V — 내장 도구로 대체 |
+| `unknown` | 에러 미분류 | V+O — 전반적 재구성 |
