@@ -391,14 +391,13 @@ class Pipeline:
                         env_context=agent_info
                     )
 
-                    failure_type = self.react_agent.classify_failure(error)
                     fix_record = {
                         "technique_id": tech_id,
                         "ability_id": ability_id,
                         "svo": svo.to_dict(),
                         "original_command": original_cmd[:200],
                         "error": error[:300],
-                        "failure_type": failure_type,
+                        "failure_type": "unknown",
                     }
 
                     if react_result:
@@ -409,6 +408,7 @@ class Pipeline:
                         fix_record["fixed_command"] = fixed_cmd
                         fix_record["thought"] = react_result["thought"]
                         fix_record["action"] = react_result["action"]
+                        fix_record["failure_type"] = react_result["failure_type"]
                         fix_record["svo_focus"] = react_result["svo_focus"]
                         fix_record["status"] = "patched"
                     else:
@@ -788,12 +788,11 @@ class Pipeline:
                         previous_attempts=prev_attempts, env_context=agent_info
                     )
 
-                    failure_type = self.react_agent.classify_failure(error)
                     fix_record = {
                         "technique_id": tech_id, "ability_id": ability_id,
                         "svo": svo.to_dict(),
                         "original_command": original_cmd[:200], "error": error[:300],
-                        "failure_type": failure_type,
+                        "failure_type": "unknown",
                     }
 
                     if react_result:
@@ -802,6 +801,7 @@ class Pipeline:
                         fix_record["fixed_command"] = fixed_cmd
                         fix_record["thought"] = react_result["thought"]
                         fix_record["action"] = react_result["action"]
+                        fix_record["failure_type"] = react_result["failure_type"]
                         fix_record["svo_focus"] = react_result["svo_focus"]
                         fix_record["status"] = "patched"
                     else:

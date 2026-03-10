@@ -46,34 +46,13 @@ class ReactAgent:
       Observe: "수정 결과를 확인"
     """
 
-    # 에러 패턴 → 실패 유형 매핑
-    FAILURE_PATTERNS = {
-        "verb_failure": [
-            "command not found", "not recognized as", "is not recognized",
-            "not operable", "unable to find", "could not be found"
-        ],
-        "object_failure": [
-            "file not found", "path not found", "no such file",
-            "cannot find path", "does not exist", "itemnotfoundexception",
-            "the system cannot find"
-        ],
-        "subject_failure": [
-            "access denied", "access is denied", "permission denied",
-            "operation not permitted", "requires elevation",
-            "not have enough privilege", "run as administrator",
-            "unauthorizedaccessexception"
-        ],
-        "syntax_failure": [
-            "syntax error", "unexpected token", "bad substitution",
-            "missing operand", "parse error", "incomplete command",
-            "is not valid"
-        ],
-        "env_failure": [
-            "not installed", "module not found", "no module named",
-            "import error", "dll not found", "assembly not found",
-            "cmdlet not found"
-        ]
-    }
+    # 권한 문제 감지 (조기 종료 전용 — LLM 호출 낭비 방지)
+    PERMISSION_PATTERNS = [
+        "access denied", "access is denied", "permission denied",
+        "operation not permitted", "requires elevation",
+        "not have enough privilege", "run as administrator",
+        "unauthorizedaccessexception"
+    ]
 
 
     def __init__(self):
@@ -81,26 +60,10 @@ class ReactAgent:
         self.model = LLM_CONFIG["model"]
         self.caldera = CalderaClient()
 
-    def classify_failure(self, error_output: str) -> str:
-        """에러 메시지를 SVO 실패 유형으로 분류"""
-        error_lower = error_output.lower()
-
-        for failure_type, patterns in self.FAILURE_PATTERNS.items():
-            for pattern in patterns:
-                if pattern in error_lower:
-                    return failure_type
-
-        return "unknown"
-
-    # failure_type → 수정 시 집중된 SVO 구성요소 매핑
-    SVO_FOCUS_MAP = {
-        "verb_failure":    "V (verb/action) — 동일한 동작을 수행하는 다른 도구/명령어로 교체",
-        "object_failure":  "O (object/path) — 대상 경로 또는 리소스 탐색 방식 변경",
-        "subject_failure": "S (subject/privilege) — 권한 상승 래핑 시도",
-        "syntax_failure":  "V+O (syntax) — 플랫폼 호환 문법으로 수정",
-        "env_failure":     "V (verb/tool) — 환경에 설치된 내장 도구로 대체",
-        "unknown":         "V+O (general) — 전반적 명령어 재구성",
-    }
+    def _is_permission_error(self, error_output: str) -> bool:
+        """권한 문제 에러 여부 확인 (조기 종료용)"""
+        e = error_output.lower()
+        return any(p in e for p in self.PERMISSION_PATTERNS)
 
     def react_fix(self, svo: AttackSVO, failed_command: str,
                   error_output: str, platform: str = "windows",
@@ -127,14 +90,10 @@ class ReactAgent:
             }
             or None (수정 불가)
         """
-        failure_type = self.classify_failure(error_output)
         attempts_history = previous_attempts or []
 
-        # subject_failure는 ReAct로 해결 불가 (권한 문제) → 바로 None
-        if failure_type == "subject_failure" and not self._has_elevation_fix(attempts_history):
-            # 첫 번째 시도에서는 권한 상승 래핑을 시도
-            pass
-        elif failure_type == "subject_failure":
+        # 권한 문제: 이전에도 동일 에러면 포기 (LLM 낭비 방지)
+        if self._is_permission_error(error_output) and self._has_elevation_fix(attempts_history):
             print(f"  [!] Permission issue — ReAct cannot resolve, needs ability-level change")
             return None
 
@@ -194,10 +153,19 @@ AUTHORIZATION CONTEXT:
 {env_block}
 
 ## RULES
-1. Output your response in this EXACT format:
+1. Output your response in this EXACT format (no extra text):
    Thought: [your analysis of why the command failed]
    Action: [your fix strategy in one sentence]
+   FailureType: [verb_failure | object_failure | subject_failure | syntax_failure | env_failure | unknown]
+   SVOFocus: [S | V | O | V+O — one line explaining which SVO element you changed and why]
    Command: [the fixed command — ONLY the command, nothing else]
+
+   FailureType definitions:
+   - verb_failure: the command/tool is not found or not recognized
+   - object_failure: the target file, path, or resource is missing or wrong
+   - subject_failure: insufficient privileges to perform the action
+   - syntax_failure: command syntax is invalid for this platform/shell
+   - env_failure: required tool, module, or dependency is not available
 
 2. The fixed command must:
    - Still perform "{svo.verb}" on "{svo.object}"
@@ -227,7 +195,7 @@ Fix the command using the ReAct framework:"""
             result_text = response["message"]["content"].strip()
 
             # ReAct 출력 파싱
-            thought, action, command = self._parse_react_output(result_text)
+            thought, action, failure_type, svo_focus, command = self._parse_react_output(result_text)
 
             if not command:
                 print(f"  [!] Failed to parse ReAct output")
@@ -239,11 +207,10 @@ Fix the command using the ReAct framework:"""
                 print(f"  [!] Duplicate command — skipping")
                 return None
 
-            svo_focus = self.SVO_FOCUS_MAP.get(failure_type, self.SVO_FOCUS_MAP["unknown"])
-
             print(f"  💭 Thought: {thought[:100]}")
             print(f"  🎯 Action: {action[:100]}")
-            print(f"  🔍 SVO Focus: {svo_focus}")
+            print(f"  ⚠ FailureType: {failure_type}")
+            print(f"  🔍 SVOFocus: {svo_focus}")
             print(f"  → Fixed: {command[:100]}{'...' if len(command) > 100 else ''}")
 
             return {
@@ -300,38 +267,45 @@ Fix the command using the ReAct framework:"""
         Expected format:
             Thought: ...
             Action: ...
+            FailureType: ...
+            SVOFocus: ...
             Command: ...
 
         Returns:
-            (thought, action, command)
+            (thought, action, failure_type, svo_focus, command)
         """
         thought = ""
         action = ""
+        failure_type = "unknown"
+        svo_focus = ""
         command = ""
 
-        # Thought 추출
-        thought_match = re.search(r"Thought:\s*(.+?)(?=Action:|Command:|$)", text, re.DOTALL | re.IGNORECASE)
+        thought_match = re.search(r"Thought:\s*(.+?)(?=Action:|FailureType:|SVOFocus:|Command:|$)", text, re.DOTALL | re.IGNORECASE)
         if thought_match:
             thought = thought_match.group(1).strip()
 
-        # Action 추출
-        action_match = re.search(r"Action:\s*(.+?)(?=Command:|$)", text, re.DOTALL | re.IGNORECASE)
+        action_match = re.search(r"Action:\s*(.+?)(?=FailureType:|SVOFocus:|Command:|$)", text, re.DOTALL | re.IGNORECASE)
         if action_match:
             action = action_match.group(1).strip()
 
-        # Command 추출
+        ft_match = re.search(r"FailureType:\s*(.+?)(?=SVOFocus:|Command:|$)", text, re.DOTALL | re.IGNORECASE)
+        if ft_match:
+            failure_type = ft_match.group(1).strip().split()[0].lower().rstrip("|")
+
+        svo_match = re.search(r"SVOFocus:\s*(.+?)(?=Command:|$)", text, re.DOTALL | re.IGNORECASE)
+        if svo_match:
+            svo_focus = svo_match.group(1).strip()
+
         command_match = re.search(r"Command:\s*(.+?)$", text, re.DOTALL | re.IGNORECASE)
         if command_match:
             command = command_match.group(1).strip()
-            # 마크다운 코드블록 제거
             command = re.sub(r"```(?:powershell|bash|sh|cmd)?\s*", "", command)
             command = re.sub(r"```\s*$", "", command)
             command = command.strip()
-            # 여러 줄이면 첫 줄만
             if "\n" in command:
                 command = command.split("\n")[0].strip()
 
-        return thought, action, command
+        return thought, action, failure_type, svo_focus, command
 
     def _has_elevation_fix(self, attempts: List[FixAttempt]) -> bool:
         """이전에 권한 상승 수정을 시도했는지 확인"""

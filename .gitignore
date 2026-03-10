@@ -6,9 +6,8 @@ __pycache__/
 config.py
 .env
 
-# Results 
 results/
 logs/
-
-# Scenarios
 scenarios/
+.omc/
+.claude/
