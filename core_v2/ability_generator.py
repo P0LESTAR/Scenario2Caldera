@@ -85,7 +85,7 @@ CALDERA VARIABLES (use these in the command — Caldera substitutes real values 
 - {{#{{paw}}}}     = agent unique ID             ← required in upload X-Request-Id header
 
 CRITICAL RULES:
-- For downloads: use #{{server}}/file/download?file=<filename> (NOT the raw IP)
+- For downloads: use #{{server}}/file/download/<filename> (NOT the raw IP, NOT query params)
 - For lateral movement: use one of the Target Hosts listed above
 - If a file is needed locally but doesn't exist, CREATE it first
 - If privilege is 'User', do NOT use commands requiring admin/SYSTEM

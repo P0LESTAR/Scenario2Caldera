@@ -43,6 +43,8 @@ if __name__ == "__main__":
                         help="기존 Caldera ability를 무시하고 SVO로만 커스텀 ability 생성 (실험용)")
     parser.add_argument("--keep-objects", action="store_true",
                         help="실행 중 생성된 Caldera 객체(ability/adversary/operation)를 지우지 않고 남김")
+    parser.add_argument("--no-svo", action="store_true",
+                        help="ReAct 프롬프트에서 SVO 제약 제거 (ablation 실험용)")
     args = parser.parse_args()
 
     # 로그 파일 설정 (logs/run_YYYYMMDD_HHMMSS.log)
@@ -58,7 +60,8 @@ if __name__ == "__main__":
     pipeline = Pipeline()
     result = None
     try:
-        result = pipeline.run(args.scenario, force_generate=args.force_generate)
+        result = pipeline.run(args.scenario, force_generate=args.force_generate,
+                              use_svo=not args.no_svo)
     finally:
         # 정상 종료든 에러 발생(키보드 인터럽트 등)이든 마지막에 삭제
         if not args.keep_objects:

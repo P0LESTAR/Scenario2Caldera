@@ -73,7 +73,8 @@ class Pipeline:
         print(f"  ✓ Cleanup complete. (Operations/Adversaries kept in Caldera)")
 
     def run(self, scenario_file: str, output_dir: str = None,
-             force_generate: bool = False) -> Optional[Tuple[Path, str]]:
+             force_generate: bool = False,
+             use_svo: bool = True) -> Optional[Tuple[Path, str]]:
         """
         전체 파이프라인 실행
 
@@ -81,10 +82,12 @@ class Pipeline:
             scenario_file: 시나리오 파일 경로
             output_dir: 결과 저장 디렉토리 (기본: results/)
             force_generate: True이면 기존 Caldera ability를 무시하고 SVO로만 생성 (실험용)
+            use_svo: False이면 ReAct 프롬프트에서 SVO 제약 제거 (ablation 실험용)
 
         Returns:
             (session_dir, operation_id) 또는 None
         """
+        self.use_svo = use_svo
         self._print_header("SCENARIO2CALDERA FULL PIPELINE EXECUTION")
 
         # 파일 경로 처리
@@ -197,7 +200,7 @@ class Pipeline:
             "privilege": agent.get('privilege', 'User') if agent else 'User',
             "target_hosts": list(set(target_hosts)),  # 중복 제거
             "payloads": self.caldera.list_payloads(),  # Caldera에 있는 실제 payload 목록
-            "payload_download_url_format": "#{server}/file/download?file=<filename>",
+            "payload_download_url_format": "#{server}/file/download/<filename>",
         }
 
         # 모든 technique에 대해 ability 확보 (기존 or 생성)
@@ -254,8 +257,9 @@ class Pipeline:
             "attack_chain": attack_chain
         })
 
+        _svo_suffix = "" if self.use_svo else "_noSVO"
         operation_plan = {
-            "name": f"S2C_{validated_data.get('threat_actor', 'Unknown').replace(' ', '_')}",
+            "name": f"S2C_{validated_data.get('threat_actor', 'Unknown').replace(' ', '_')}{_svo_suffix}",
             "description": f"Automated attack chain for {validated_data.get('scenario_name')}",
             "steps": attack_chain
         }
@@ -388,7 +392,8 @@ class Pipeline:
                         error_output=error[:500],
                         platform=platform,
                         previous_attempts=prev_attempts,
-                        env_context=agent_info
+                        env_context=agent_info,
+                        use_svo=self.use_svo
                     )
 
                     fix_record = {
@@ -637,7 +642,7 @@ class Pipeline:
             "privilege": agent.get('privilege', 'User') if agent else 'User',
             "target_hosts": list(set(target_hosts)),
             "payloads": self.caldera.list_payloads(),
-            "payload_download_url_format": "#{server}/file/download?file=<filename>",
+            "payload_download_url_format": "#{server}/file/download/<filename>",
         }
 
         ability_results = self.ability_generator.generate_abilities_for_plan(
@@ -679,8 +684,9 @@ class Pipeline:
 
         self._save_json(session_dir / "04_attack_chain.json", {"attack_chain": attack_chain})
 
+        _svo_suffix = "" if self.use_svo else "_noSVO"
         operation_plan = {
-            "name": f"S2C_{validated_data.get('threat_actor', 'Unknown').replace(' ', '_')}",
+            "name": f"S2C_{validated_data.get('threat_actor', 'Unknown').replace(' ', '_')}{_svo_suffix}",
             "description": f"SVO-generated ability test for {validated_data.get('scenario_name')}",
             "steps": attack_chain
         }
@@ -785,7 +791,8 @@ class Pipeline:
                     react_result = self.react_agent.react_fix(
                         svo=svo, failed_command=original_cmd,
                         error_output=error[:500], platform=platform,
-                        previous_attempts=prev_attempts, env_context=agent_info
+                        previous_attempts=prev_attempts, env_context=agent_info,
+                        use_svo=self.use_svo
                     )
 
                     fix_record = {
