@@ -137,14 +137,23 @@ class Pipeline:
         # ==================================================================
         self._print_header("PHASE 2: Caldera Validation")
 
-        validated_data = self.scenario.validate(parsed_data)
+        if force_generate:
+            print("  ⚡ force_generate=True — skipping Caldera validation (all abilities will be SVO-generated)")
+            validated_data = dict(parsed_data)
+            for tech in validated_data.get("techniques", []):
+                tech.setdefault("caldera_validation", {})
+            _n = len(validated_data.get("techniques", []))
+            validated_data["validation"] = {
+                "total": _n, "executable": 0, "non_executable": _n,
+                "exact_match": 0, "parent_fallback": 0, "coverage_rate": 0.0,
+            }
+        else:
+            validated_data = self.scenario.validate(parsed_data)
 
         validation = validated_data.get('validation', {})
         print(f"\n  ✓ Total Techniques:     {validation.get('total')}")
         print(f"  ✓ Executable:           {validation.get('executable')} ({validation.get('coverage_rate', 0):.1f}%)")
         print(f"  ✗ Non-Executable:       {validation.get('non_executable')}")
-
-        self._save_json(session_dir / "02_validated_scenario.json", validated_data)
 
         # ------------------------------------------------------------------
         # PHASE 2.5: SVO 추출 (모든 technique에 대해)
@@ -470,7 +479,7 @@ class Pipeline:
 
                 round_results = self._wait_and_collect(
                     retry_op_id, session_dir,
-                    result_filename=f"07_react_round_{round_num}.json"
+                    result_filename=None
                 )
 
                 if not round_results:
@@ -545,8 +554,6 @@ class Pipeline:
         print(f"    ├── 05_created_operation.json")
         print(f"    ├── 06_operation_results.json")
         if react_history:
-            for rh in react_history:
-                print(f"    ├── 07_react_round_{rh['round']}.json")
             print(f"    ├── 07_react_summary.json")
         print(f"    └── session_info.json")
 
@@ -595,12 +602,21 @@ class Pipeline:
 
         # PHASE 2
         self._print_header("PHASE 2: Caldera Validation")
-        validated_data = self.scenario.validate(parsed_data)
+        if force_generate:
+            print("  ⚡ force_generate=True — skipping Caldera validation (all abilities will be SVO-generated)")
+            validated_data = dict(parsed_data)
+            for tech in validated_data.get("techniques", []):
+                tech.setdefault("caldera_validation", {})
+            _n = len(validated_data.get("techniques", []))
+            validated_data["validation"] = {
+                "total": _n, "executable": 0, "non_executable": _n,
+                "exact_match": 0, "parent_fallback": 0, "coverage_rate": 0.0,
+            }
+        else:
+            validated_data = self.scenario.validate(parsed_data)
         validation = validated_data.get('validation', {})
         print(f"\n  ✓ Total:      {validation.get('total')}")
         print(f"  ✓ Executable: {validation.get('executable')} ({validation.get('coverage_rate', 0):.1f}%)")
-        self._save_json(session_dir / "02_validated_scenario.json", validated_data)
-
         # PHASE 2.5
         self._print_header("PHASE 2.5: SVO Extraction")
         all_techniques = validated_data.get("techniques", [])
@@ -847,7 +863,7 @@ class Pipeline:
                 current_op_id = retry_op.get('id')
                 round_results = self._wait_and_collect(
                     current_op_id, session_dir,
-                    result_filename=f"07_react_round_{round_num}.json"
+                    result_filename=None
                 )
 
                 if not round_results:
@@ -892,7 +908,7 @@ class Pipeline:
 
     def _wait_and_collect(self, operation_id: str, session_dir: Path,
                           poll_interval: int = 3, timeout: int = 1800,
-                          result_filename: str = "05_operation_results.json") -> Optional[Dict]:
+                          result_filename: Optional[str] = "05_operation_results.json") -> Optional[Dict]:
         """
         Operation 완료까지 폴링 후 결과 수집
 
@@ -957,14 +973,15 @@ class Pipeline:
         self.caldera.print_analysis(op, links, stats)
 
         # 결과 저장
-        self._save_json(session_dir / result_filename, {
-            "operation_id": operation_id,
-            "operation_name": op.get('name'),
-            "state": op.get('state'),
-            "summary": stats,
-            "links": links,
-            "analyzed_at": datetime.now().isoformat()
-        })
+        if result_filename:
+            self._save_json(session_dir / result_filename, {
+                "operation_id": operation_id,
+                "operation_name": op.get('name'),
+                "state": op.get('state'),
+                "summary": stats,
+                "links": links,
+                "analyzed_at": datetime.now().isoformat()
+            })
 
         return {"stats": stats, "links": links}
 

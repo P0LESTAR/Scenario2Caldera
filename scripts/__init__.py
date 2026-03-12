@@ -1,3 +1,0 @@
-"""
-Scenario2Caldera Scripts
-"""
