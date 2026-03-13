@@ -193,22 +193,17 @@ class Pipeline:
         self._optimize_agent_sleep(sleep_min=3, sleep_max=5)
 
         # 환경 컨텍스트 수집 (LLM이 실제 주소를 커맨드에 넣도록)
-        from config import CALDERA_CONFIG
-        target_hosts = []
-        for a in agents:
-            host_ip = a.get('host_ip_addrs', [])
-            if isinstance(host_ip, list):
-                target_hosts.extend(host_ip)
-            elif isinstance(host_ip, str) and host_ip:
-                target_hosts.append(host_ip)
+        import os
+        from dotenv import load_dotenv
+        
+        load_dotenv()
 
-        agent_url = CALDERA_CONFIG.get("agent_url", CALDERA_CONFIG["url"])
+        agent_url = os.getenv("CALDERA_AGENT_URL", os.getenv("CALDERA_URL", "http://192.168.50.31:8888"))
         agent_info = {
             "c2_server_url": agent_url,
             "host": agent.get('host', '') if agent else '',
             "privilege": agent.get('privilege', 'User') if agent else 'User',
-            "target_hosts": list(set(target_hosts)),  # 중복 제거
-            "payloads": self.caldera.list_payloads(),  # Caldera에 있는 실제 payload 목록
+            "payloads": self.caldera.list_payloads(),
             "payload_download_url_format": "#{server}/file/download/<filename>",
         }
 
@@ -642,21 +637,16 @@ class Pipeline:
         # 에이전트 sleep 단축 (속도 최적화)
         self._optimize_agent_sleep(sleep_min=3, sleep_max=5)
 
-        from config import CALDERA_CONFIG
-        target_hosts = []
-        for a in agents:
-            host_ip = a.get('host_ip_addrs', [])
-            if isinstance(host_ip, list):
-                target_hosts.extend(host_ip)
-            elif isinstance(host_ip, str) and host_ip:
-                target_hosts.append(host_ip)
+        import os
+        from dotenv import load_dotenv
+        
+        load_dotenv()
 
-        agent_url = CALDERA_CONFIG.get("agent_url", CALDERA_CONFIG["url"])
+        agent_url = os.getenv("CALDERA_AGENT_URL", os.getenv("CALDERA_URL", "http://192.168.50.31:8888"))
         agent_info = {
             "c2_server_url": agent_url,
             "host": agent.get('host', '') if agent else '',
             "privilege": agent.get('privilege', 'User') if agent else 'User',
-            "target_hosts": list(set(target_hosts)),
             "payloads": self.caldera.list_payloads(),
             "payload_download_url_format": "#{server}/file/download/<filename>",
         }

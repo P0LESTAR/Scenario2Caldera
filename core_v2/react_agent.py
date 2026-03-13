@@ -20,7 +20,11 @@ from ollama import Client as OllamaClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import LLM_CONFIG
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from core_v2.svo_extractor import AttackSVO
 from core_v2.caldera_client import CalderaClient
 
@@ -56,8 +60,9 @@ class ReactAgent:
 
 
     def __init__(self):
-        self.llm_client = OllamaClient(host=LLM_CONFIG["host"])
-        self.model = LLM_CONFIG["model"]
+        llm_host = os.getenv("OLLAMA_HOST", "http://192.168.50.252:11434")
+        self.llm_client = OllamaClient(host=llm_host)
+        self.model = os.getenv("LLM_MODEL", "gpt-oss:120b")
         self.caldera = CalderaClient()
 
     def _is_permission_error(self, error_output: str) -> bool:
@@ -115,14 +120,12 @@ class ReactAgent:
         if c2_url:
             agent_host = env.get("agent_host", "")
             agent_privilege = env.get("agent_privilege", "User")
-            target_hosts = env.get("target_hosts", [])
             env_block = f"""
 
 ## ENVIRONMENT
 - C2 Server (reference): {c2_url}
 - Agent Host: {agent_host}
 - Agent Privilege: {agent_privilege}
-- Target Hosts: {', '.join(target_hosts) if target_hosts else 'none'}
 - If privilege is 'User': avoid admin-only commands
 
 CALDERA VARIABLES (use in command — Caldera substitutes at runtime):

@@ -13,7 +13,9 @@ from ollama import Client as OllamaClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import LLM_CONFIG
+from dotenv import load_dotenv
+
+load_dotenv()
 from core_v2.svo_extractor import AttackSVO
 from core_v2.caldera_client import CalderaClient
 
@@ -29,8 +31,9 @@ class AbilityGenerator:
     }
 
     def __init__(self):
-        self.llm_client = OllamaClient(host=LLM_CONFIG["host"])
-        self.model = LLM_CONFIG["model"]
+        llm_host = os.getenv("OLLAMA_HOST", "http://192.168.50.252:11434")
+        self.llm_client = OllamaClient(host=llm_host)
+        self.model = os.getenv("LLM_MODEL", "gpt-oss:120b")
         self.caldera = CalderaClient()
 
     def generate_command(self, svo: AttackSVO, platform: str = "windows",
@@ -54,7 +57,6 @@ class AbilityGenerator:
         c2_url = env.get("c2_server_url", "")
         agent_host = env.get("agent_host", "")
         agent_privilege = env.get("agent_privilege", "User")
-        target_hosts = env.get("target_hosts", [])
 
         payloads = env.get("payloads", [])
         payload_url_fmt = env.get("payload_download_url_format", "")
@@ -77,8 +79,7 @@ class AbilityGenerator:
 ENVIRONMENT:
 - C2 Server (reference only): {c2_url}
 - Agent Host: {agent_host}
-- Agent Privilege: {agent_privilege}
-- Target Hosts for lateral movement: {', '.join(target_hosts) if target_hosts else 'none available'}{payload_hint}
+- Agent Privilege: {agent_privilege}{payload_hint}
 
 CALDERA VARIABLES (use these in the command — Caldera substitutes real values at runtime):
 - {{#{{server}}}}  = C2 server URL (= {c2_url})  ← use for downloads and uploads
@@ -86,7 +87,6 @@ CALDERA VARIABLES (use these in the command — Caldera substitutes real values 
 
 CRITICAL RULES:
 - For downloads: use #{{server}}/file/download/<filename> (NOT the raw IP, NOT query params)
-- For lateral movement: use one of the Target Hosts listed above
 - If a file is needed locally but doesn't exist, CREATE it first
 - If privilege is 'User', do NOT use commands requiring admin/SYSTEM
 - For file uploads to C2: use this pattern (single line with semicolons — Caldera strips newlines):
@@ -246,7 +246,6 @@ Output ONLY the command:"""
             "c2_server_url": agent_info.get("c2_server_url", ""),
             "agent_host": agent_info.get("host", ""),
             "agent_privilege": agent_info.get("privilege", "User"),
-            "target_hosts": agent_info.get("target_hosts", []),
             "payloads": agent_info.get("payloads", []),
             "payload_download_url_format": agent_info.get("payload_download_url_format", ""),
         }

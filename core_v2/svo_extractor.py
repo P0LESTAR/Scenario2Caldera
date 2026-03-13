@@ -15,7 +15,10 @@ from ollama import Client as OllamaClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import LLM_CONFIG
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @dataclass
@@ -57,8 +60,9 @@ class SVOExtractor:
     }
 
     def __init__(self):
-        self.llm_client = OllamaClient(host=LLM_CONFIG["host"])
-        self.model = LLM_CONFIG["model"]
+        llm_host = os.getenv("OLLAMA_HOST", "http://192.168.50.252:11434")
+        self.llm_client = OllamaClient(host=llm_host)
+        self.model = os.getenv("LLM_MODEL", "gpt-oss:120b")
 
     def extract_svo(self, technique: Dict) -> Optional[AttackSVO]:
         """

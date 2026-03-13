@@ -14,7 +14,11 @@ from ollama import Client as OllamaClient
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import LLM_CONFIG
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 
 class LLMOrchestrator:
@@ -24,8 +28,9 @@ class LLMOrchestrator:
     """
 
     def __init__(self):
-        self.client = OllamaClient(host=LLM_CONFIG["host"])
-        self.model = LLM_CONFIG["model"]
+        llm_host = os.getenv("OLLAMA_HOST", "http://192.168.50.252:11434")
+        self.client = OllamaClient(host=llm_host)
+        self.model = os.getenv("LLM_MODEL", "gpt-oss:120b")
 
     def plan_executable_attack_chain(self, validated_techniques: List[Dict],
                                      scenario_context: Dict = None) -> List[Dict]:

@@ -14,16 +14,18 @@ import sys
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import CALDERA_CONFIG
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class CalderaClient:
     """Caldera REST API 클라이언트 — 모든 Caldera 상호작용 담당"""
 
     def __init__(self):
-        self.base_url = CALDERA_CONFIG["url"]
-        self.api_key = CALDERA_CONFIG["api_key"]
-        self.timeout = CALDERA_CONFIG.get("timeout", 30)
+        self.base_url = os.getenv("CALDERA_URL", "http://192.168.50.31:8888")
+        self.api_key = os.getenv("CALDERA_API_KEY", "ADMIN123")
+        self.timeout = int(os.getenv("CALDERA_TIMEOUT", "30"))
 
         self.headers = {
             "KEY": self.api_key,

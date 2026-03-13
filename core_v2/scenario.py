@@ -14,7 +14,11 @@ from ollama import Client as OllamaClient
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import LLM_CONFIG, SCENARIOS_DIR
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from core_v2.caldera_client import CalderaClient
 
 
