@@ -12,12 +12,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from ollama import Client as OllamaClient
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import os
 from dotenv import load_dotenv
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
 load_dotenv()
 
 

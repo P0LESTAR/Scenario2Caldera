@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from pathlib import Path
 import sys
+import os
 
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))

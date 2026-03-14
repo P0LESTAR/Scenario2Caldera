@@ -10,10 +10,10 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 from ollama import Client as OllamaClient
+import os
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from dotenv import load_dotenv
 
 load_dotenv()
 from core_v2.svo_extractor import AttackSVO

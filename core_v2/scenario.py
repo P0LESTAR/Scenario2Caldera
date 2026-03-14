@@ -26,8 +26,9 @@ class ScenarioProcessor:
     """시나리오 파싱 + Caldera 검증 + Ability 선택"""
 
     def __init__(self):
-        self.llm_client = OllamaClient(host=LLM_CONFIG["host"])
-        self.model = LLM_CONFIG["model"]
+        llm_host = os.getenv("OLLAMA_HOST", "http://192.168.50.252:11434")
+        self.llm_client = OllamaClient(host=llm_host)
+        self.model = os.getenv("LLM_MODEL", "gpt-oss:120b")
         self.caldera_client = CalderaClient()
 
     # =========================================================================
@@ -121,7 +122,7 @@ Output the JSON structure."""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                options={"temperature": LLM_CONFIG["temperature"]}
+                options={"temperature": float(os.getenv("LLM_TEMPERATURE", "0.0"))}
             )
 
             result_text = response["message"]["content"].strip()

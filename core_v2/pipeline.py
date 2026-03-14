@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+import os
+from dotenv import load_dotenv
 
 # 상위 디렉토리를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -193,8 +195,7 @@ class Pipeline:
         self._optimize_agent_sleep(sleep_min=3, sleep_max=5)
 
         # 환경 컨텍스트 수집 (LLM이 실제 주소를 커맨드에 넣도록)
-        import os
-        from dotenv import load_dotenv
+        
         
         load_dotenv()
 
