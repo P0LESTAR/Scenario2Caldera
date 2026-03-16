@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scenario2Caldera v2 실행 진입점
+Scenario2Caldera v3 실행 진입점
 
 Usage:
     python run.py scenario.md                    # 기본 실행 (기존 ability 우선)
@@ -32,10 +32,10 @@ class _Tee:
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core_v2.pipeline import Pipeline
+from core_v3.pipeline import Pipeline
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Scenario2Caldera v2 Pipeline")
+    parser = argparse.ArgumentParser(description="Scenario2Caldera v3 Pipeline")
     parser.add_argument("scenario", nargs="?",
                         default="scenarios/APT3_scenario.md",
                         help="시나리오 파일 경로")
