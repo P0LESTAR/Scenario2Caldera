@@ -3,7 +3,7 @@
 Scenario2Caldera v3 실행 진입점
 
 Usage:
-    python run.py scenario.md                    # 기본 실행 (기존 ability 우선)
+    python run.py scenario.md        # 기본 실행 (기존 ability 우선)
     python run.py --force-generate   # SVO-only 실험 (기존 ability 무시)
 """
 import sys

@@ -165,7 +165,7 @@ class Pipeline:
         all_techniques = validated_data.get("techniques", [])
         svos = self.svo_extractor.extract_all_svos(all_techniques)
 
-        self._save_json(session_dir / "02_5_svo_extraction.json", {
+        self._save_json(session_dir / "02_svo_extraction.json", {
             "total_techniques": len(all_techniques),
             "svo_extracted": len(svos),
             "svos": [s.to_dict() for s in svos]
